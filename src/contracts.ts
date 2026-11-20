@@ -36,6 +36,10 @@ export interface Filter {
   readonly value: string;
 }
 
+export type Grouping =
+  | { readonly column: 'year' | 'type' | `property:${string}`; readonly direction: Direction }
+  | { readonly column: 'tags'; readonly tag: string; readonly direction: Direction };
+
 export interface View {
   readonly id: string;
   readonly name: string;
@@ -43,6 +47,7 @@ export interface View {
   readonly columns: readonly Column[];
   readonly sort: { readonly column: Column; readonly direction: Direction };
   readonly filters: readonly Filter[];
+  readonly group?: Grouping;
 }
 
 export interface Scope {
@@ -97,6 +102,12 @@ export interface MutationResult {
   readonly skipped: number;
 }
 
+export type BulkChange =
+  | { readonly kind: 'property'; readonly key: string; readonly value: PropertyValue }
+  | { readonly kind: 'tag'; readonly tag: string; readonly add: boolean };
+
+export type BulkResult = MutationResult & { readonly readOnly: number };
+
 /** All DOM is created in the owning document; raw Zotero objects remain in the host. */
 export interface WorkspaceHost {
   settings(): Preferences;
@@ -106,6 +117,8 @@ export interface WorkspaceHost {
   load(scope: string): Promise<Catalog>;
   setProperty(id: number, key: string, value: PropertyValue): Promise<void>;
   changeTag(id: number, tag: string, add: boolean): Promise<void>;
+  bulk(ids: readonly number[], change: BulkChange): Promise<BulkResult>;
+  suggestPropertyKey(key: string, existing: readonly Property[]): string | undefined;
   openItem(id: number, pdf: boolean): Promise<void>;
   subscribe(listener: (kind: 'data' | 'settings') => void): () => void;
 }

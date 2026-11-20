@@ -1,4 +1,5 @@
 import type { Property, PropertyValue } from './contracts';
+import { BASES_SYNC_KEY } from './sync-marker';
 
 const LINE_BREAK = /\r\n|[\r\n\u0085\u2028\u2029]/;
 const LINE_PARTS = new RegExp(`(${LINE_BREAK.source})`);
@@ -58,14 +59,11 @@ const RESERVED = new Set(
     'Archive Location',
     'Rights',
     'Extra',
+    BASES_SYNC_KEY,
   ].map(reservedIdentity),
 );
 
-function validatedKey(raw: string, extraReserved?: ReadonlySet<string>): string {
-  const key = raw.trim().normalize('NFC');
-  if (!key || raw.includes(':') || LINE_BREAK.test(raw)) {
-    throw new Error('Property names must be nonempty, single-line, and contain no colon.');
-  }
+export function isReservedPropertyKey(key: string, extraReserved?: ReadonlySet<string>): boolean {
   const identity = reservedIdentity(key);
   let reserved = RESERVED.has(identity) || identity.startsWith('tex.');
   if (!reserved && extraReserved) {
@@ -75,7 +73,17 @@ function validatedKey(raw: string, extraReserved?: ReadonlySet<string>): string 
       break;
     }
   }
-  if (reserved) throw new Error('This property name is reserved by Zotero or its citation tools.');
+  return reserved;
+}
+
+function validatedKey(raw: string, extraReserved?: ReadonlySet<string>): string {
+  const key = raw.trim().normalize('NFC');
+  if (!key || raw.includes(':') || LINE_BREAK.test(raw)) {
+    throw new Error('Property names must be nonempty, single-line, and contain no colon.');
+  }
+  if (isReservedPropertyKey(key, extraReserved)) {
+    throw new Error('This property name is reserved by Zotero or its citation tools.');
+  }
   return key;
 }
 

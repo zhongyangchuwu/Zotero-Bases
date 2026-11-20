@@ -79,6 +79,20 @@ export const workspaceCSS = String.raw`
 .zb-workspace :is([aria-selected='true'], [aria-pressed='true']) { color: var(--zb-accent); border-color: var(--zb-accent); background: var(--zb-selected); }
 .zb-workspace .zb-view-actions { flex-shrink: 0; }
 .zb-workspace .zb-popout { margin-inline-start: auto; }
+.zb-workspace .zb-top { position: relative; }
+.zb-workspace .zb-sync { margin-inline-start: auto; }
+.zb-workspace .zb-sync-pane {
+  position: absolute;
+  inset-block-start: 100%;
+  inset-inline-end: 0;
+  width: min(32rem, 100%);
+  z-index: 3;
+}
+.zb-workspace .zb-sync-pane p { margin: 0; }
+.zb-workspace .zb-sync-location,
+.zb-workspace .zb-sync-location label { display: grid; gap: 0.35rem; min-width: 0; }
+.zb-workspace .zb-sync-location { margin-block-start: 0.35rem; }
+.zb-workspace .zb-sync-location button { justify-self: start; }
 .zb-workspace .zb-panel { display: flex; flex-direction: column; gap: 0.55rem; flex: 1; min-height: 0; }
 .zb-workspace .zb-toolbar { align-items: flex-start; }
 .zb-workspace details { max-width: 100%; }
@@ -107,6 +121,13 @@ export const workspaceCSS = String.raw`
   border-radius: 0.3rem;
   padding: 0.3rem 0.55rem;
 }
+.zb-workspace .zb-bulk {
+  border: 1px solid var(--zb-border);
+  border-radius: 0.3rem;
+  background: var(--zb-surface);
+  padding: 0.3rem 0.55rem;
+}
+.zb-workspace .zb-key-hint { color: var(--zb-accent); }
 .zb-workspace .zb-status { color: var(--zb-muted); }
 .zb-workspace .zb-status[data-error='true'], .zb-workspace .zb-danger { color: var(--zb-danger); }
 .zb-workspace .zb-table-wrap {
@@ -122,6 +143,10 @@ export const workspaceCSS = String.raw`
 .zb-workspace th { white-space: nowrap; position: sticky; inset-block-start: 0; z-index: 1; background: var(--zb-bg); }
 .zb-workspace tbody tr:hover, .zb-workspace tbody tr:focus-visible { background: var(--zb-selected); }
 .zb-workspace tbody tr:focus-visible { outline-offset: -2px; }
+.zb-workspace .zb-select-cell { width: 1%; text-align: center; vertical-align: middle; }
+.zb-workspace tbody tr[data-selected='true'] { background: var(--zb-selected); }
+.zb-workspace .zb-group > td { background: var(--zb-bg); }
+.zb-workspace .zb-group-toggle { font-weight: 600; text-align: start; overflow-wrap: anywhere; }
 .zb-workspace .zb-cell-button {
   background: transparent;
   border-color: transparent;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createConfig, SCHEMA_PREF, VIEWS_PREF } from '../src/config';
+import { createConfig, decodeSyncSnapshot, SCHEMA_PREF, VIEWS_PREF } from '../src/config';
 import type { Prefs } from '../src/data';
 import type { View } from '../src/contracts';
 import { validateProperty } from '../src/extra';
@@ -31,6 +31,7 @@ const secondView = {
     { column: 'property:Removed', operator: 'equals', value: 'gone' },
     { column: 'tags', operator: 'has', value: 'elsewhere' },
   ],
+  group: { column: 'property:Removed', direction: 'desc' },
 } satisfies View;
 
 describe('Zotero Bases configuration', () => {
@@ -91,5 +92,48 @@ describe('Zotero Bases configuration', () => {
     expect(config.settings().active).toBe(secondView.id);
     config.writeViews({ views: [], active: secondView.id });
     expect(config.settings().active).toBe('default');
+  });
+
+  it('restores a complete validated remote snapshot and keeps the device selection if available', () => {
+    const { prefs } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const initial = config.settings().views[0]!;
+    config.writeViews({ views: [initial, secondView], active: initial.id });
+    const payload = {
+      schema: [{ key: 'ReviewState', type: 'single-select', options: ['Reading', 'Done'] }],
+      views: [
+        { ...secondView, group: { column: 'tags', tag: 'Reading', direction: 'desc' } },
+        initial,
+      ],
+    };
+    const remote = decodeSyncSnapshot(payload, validateProperty)!;
+    config.applySync(remote);
+    expect(config.settings()).toEqual({
+      properties: payload.schema,
+      views: payload.views,
+      active: initial.id,
+    });
+    config.applySync({ schema: remote.schema, views: [remote.views[0]!] });
+    expect(config.settings().active).toBe(secondView.id);
+  });
+
+  it('rejects a remote snapshot as a unit for invalid or duplicate definitions or view configuration', () => {
+    const decode = (input: unknown) => decodeSyncSnapshot(input, validateProperty);
+    const text = { key: 'Stage', type: 'text' };
+    expect(
+      decode({ schema: [text, { ...text, key: 'stage' }], views: [secondView] }),
+    ).toBeUndefined();
+    expect(decode({ schema: [{ ...text, key: 'DOI' }], views: [secondView] })).toBeUndefined();
+    expect(decode({ schema: [text], views: [secondView, secondView] })).toBeUndefined();
+    expect(decode({ schema: [text], views: [{ ...secondView, sort: {} }] })).toBeUndefined();
+    expect(
+      decode({
+        schema: [text],
+        views: [{ ...secondView, group: { column: 'tags', direction: 'asc' } }],
+      }),
+    ).toBeUndefined();
+    expect(decode({ schema: [text], views: [secondView] })?.views[0]?.group).toEqual(
+      secondView.group,
+    );
   });
 });

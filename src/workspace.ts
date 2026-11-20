@@ -1,9 +1,11 @@
 import {
   NATIVE_COLUMNS,
+  type BulkChange,
   type Catalog,
   type Column,
   type ConfigChange,
   type Filter,
+  type Grouping,
   type MutationResult,
   type Operator,
   type Preferences,
@@ -14,7 +16,10 @@ import {
   type View,
   type WorkspaceHost,
 } from './contracts';
+import { groupRows, isGroupProperty, type RowGroup } from './grouping';
 import { cellValue, filterOperators, queryCatalog, type QueryResult } from './query';
+import type { SyncPort } from './sync';
+import { mountSyncControls } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
 
 const PAGE_SIZE = 50;
@@ -42,6 +47,17 @@ const words = {
   direction: ['Sort direction', '排序方向'],
   asc: ['Ascending', '升序'],
   desc: ['Descending', '降序'],
+  grouping: ['Grouping', '分组'],
+  groupBy: ['Group by', '分组字段'],
+  noGrouping: ['No grouping', '不分组'],
+  groupDirection: ['Group direction', '分组顺序'],
+  groupTag: ['Tag to group by', '用于分组的标签'],
+  chooseTag: ['Choose an existing tag', '选择现有标签'],
+  invalidGrouping: ['Unavailable grouping is ignored.', '已忽略失效分组。'],
+  clearGrouping: ['Clear grouping', '清除分组'],
+  missingGroup: ['No value', '未设置'],
+  withTag: ['With tag', '有标签'],
+  withoutTag: ['Without tag', '无标签'],
   title: ['Title', '标题'],
   creators: ['Authors', '作者'],
   year: ['Year', '年份'],
@@ -73,6 +89,8 @@ const words = {
   propertyKey: ['Property key', '属性键'],
   propertyType: ['Property type', '属性类型'],
   propertyOptions: ['Options (one per line)', '选项（每行一个）'],
+  reservedKey: ['This key is reserved by Zotero.', '这是 Zotero 保留字段。'],
+  useKey: ['Use', '改用'],
   addProperty: ['Add property', '添加属性'],
   addOption: ['Add option', '添加选项'],
   newOption: ['New option', '新选项'],
@@ -102,6 +120,15 @@ const words = {
   removeTag: ['Remove tag', '移除标签'],
   table: ['Items', '条目'],
   loading: ['Loading items…', '正在加载条目…'],
+  selectAll: ['Select all matching items', '选择所有匹配条目'],
+  selectItem: ['Select item', '选择条目'],
+  clearSelection: ['Clear selection', '清除选中项'],
+  bulkEdit: ['Bulk edit', '批量编辑'],
+  bulkProperty: ['Bulk property', '批量编辑的属性'],
+  bulkValue: ['Bulk value', '批量设置的值'],
+  bulkSet: ['Set value', '设置值'],
+  bulkClear: ['Clear property values', '清除属性值'],
+  bulkTag: ['Bulk tag', '批量编辑的标签'],
   noItems: ['No matching items', '没有匹配条目'],
   noColumns: ['No visible columns. Choose columns above.', '没有可见列，请在上方选择要显示的列。'],
   previous: ['Previous page', '上一页'],
@@ -134,7 +161,7 @@ function named(element: HTMLElement, label: string): void {
 export function mountWorkspace(
   root: HTMLElement,
   host: WorkspaceHost,
-  options: { language: 'zh-CN' | 'en'; popOut?: () => void },
+  options: { language: 'zh-CN' | 'en'; popOut?: () => void; sync?: SyncPort },
 ): () => void {
   const doc = root.ownerDocument;
   const zh = options.language === 'zh-CN';
@@ -147,6 +174,12 @@ export function mountWorkspace(
   let catalog: Catalog | undefined;
   let loadedScope: string | undefined;
   let result: QueryResult | undefined;
+  let groups: readonly RowGroup[] | undefined;
+  const foldedGroups = new Set<RowGroup['value']>();
+  let choosingGroupTag = false;
+  const selected = new Set<number>();
+  let selectionAnchor: number | undefined;
+  let bulkPending = false;
   let page = 0;
   let renameViewId: string | undefined;
   let deleteChoice: { key: string; option?: string } | undefined;
@@ -260,7 +293,7 @@ export function mountWorkspace(
   style.textContent = workspaceCSS;
   const surface = element('section', 'zb-workspace');
   surface.lang = options.language;
-  const top = element('div', 'zb-bar');
+  const top = element('div', 'zb-bar zb-top');
   const viewControls = element('div', 'zb-tabs');
   const tabs = element('div', 'zb-tablist');
   tabs.setAttribute('role', 'tablist');
@@ -276,6 +309,9 @@ export function mountWorkspace(
   viewControls.append(tabs, actions, renameSlot);
   top.append(viewControls);
   if (options.popOut) top.append(button(t('popOut'), options.popOut, 'zb-popout'));
+  const disposeSync = options.sync
+    ? mountSyncControls(top, options.sync, options.language)
+    : undefined;
   const panel = element('div', 'zb-panel');
   panel.id = `${mountId}-panel`;
   panel.setAttribute('role', 'tabpanel');
@@ -283,19 +319,38 @@ export function mountWorkspace(
   const scopeSlot = element('label', 'zb-line');
   const [columnDetails, columnPane] = details(t('columns'));
   const [filterDetails, filterPane] = details(t('filters'));
+  const [groupDetails, groupPane] = details(t('grouping'));
   const [propertyDetails, propertyPane] = details(t('properties'));
   const propertyList = element('div');
   const warning = element('div', 'zb-warning zb-line');
-  const warningText = element('span');
-  warningText.setAttribute('role', 'status');
-  warning.append(warningText, button(t('removeInvalid'), removeInvalidFilters));
+  const filterWarning = element('span', 'zb-line');
+  const filterWarningText = element('span');
+  filterWarningText.setAttribute('role', 'status');
+  filterWarning.append(filterWarningText, button(t('removeInvalid'), removeInvalidFilters));
+  const groupWarning = element('span', 'zb-line');
+  const groupWarningText = element('span');
+  groupWarningText.setAttribute('role', 'status');
+  groupWarning.append(
+    groupWarningText,
+    button(t('clearGrouping'), () => setGrouping(undefined)),
+  );
+  warning.append(filterWarning, groupWarning);
   warning.hidden = true;
   const status = element('p', 'zb-status');
   status.setAttribute('role', 'status');
   status.hidden = true;
   const retry = button(t('retry'), () => refresh());
   retry.hidden = true;
-  toolbar.append(scopeSlot, columnDetails, filterDetails, propertyDetails, retry);
+  toolbar.append(scopeSlot, columnDetails, filterDetails, groupDetails, propertyDetails, retry);
+  const bulkBar = element('section', 'zb-bulk zb-line');
+  named(bulkBar, t('bulkEdit'));
+  bulkBar.hidden = true;
+  const selectionCount = element('strong');
+  selectionCount.setAttribute('aria-live', 'polite');
+  const bulkActions = element('fieldset', 'zb-line');
+  const [bulkPropertyForm, renderBulkProperty] = buildBulkPropertyForm();
+  bulkActions.append(bulkPropertyForm, buildBulkTagForm());
+  bulkBar.append(selectionCount, button(t('clearSelection'), clearSelection), bulkActions);
   const tableWrap = element('div', 'zb-table-wrap');
   const pagination = element('div', 'zb-pagination');
   const tagValues = element('datalist');
@@ -304,7 +359,7 @@ export function mountWorkspace(
   const previous = button(t('previous'), () => setPage(page - 1));
   const next = button(t('next'), () => setPage(page + 1));
   pagination.append(count, previous, next);
-  panel.append(toolbar, warning, status, tableWrap, pagination);
+  panel.append(toolbar, warning, bulkBar, status, tableWrap, pagination);
   surface.append(top, panel, tagValues);
   root.append(style, surface);
 
@@ -362,13 +417,31 @@ export function mountWorkspace(
     const changedColumns = !same(previousView.columns, view.columns);
     const changedSort = !same(previousView.sort, view.sort);
     const changedFilters = !same(previousView.filters, view.filters);
+    const changedGrouping = !same(previousView.group, view.group);
+    if (changedActive || changedScope || changedGrouping) choosingGroupTag = false;
+    if (
+      changedActive ||
+      changedScope ||
+      previousView.group?.column !== view.group?.column ||
+      (previousView.group?.column === 'tags' &&
+        view.group?.column === 'tags' &&
+        previousView.group.tag !== view.group.tag)
+    ) {
+      foldedGroups.clear();
+    }
+    if (changedActive || changedScope || changedFilters) clearSelection();
     if (changedActive) stopViewRename();
     if (changedViews) renderTabs();
     if (changedScope || changedActive) renderScope();
-    if (changedProperties) renderProperties();
+    if (changedProperties) {
+      renderProperties();
+      renderBulkProperty();
+      updatePropertyHint();
+    }
     if (changedColumns || changedSort || changedProperties || changedActive) renderColumns();
     if (changedProperties || changedActive || (changedFilters && !keepFilterInput)) renderFilters();
-    if (changedActive || changedScope || changedSort || changedFilters) page = 0;
+    if (changedProperties || changedActive || changedScope || changedGrouping) renderGrouping();
+    if (changedActive || changedScope || changedSort || changedFilters || changedGrouping) page = 0;
     if (changedActive || changedScope || changedColumns) closeEditor?.(false);
     if (changedScope) {
       refresh();
@@ -377,7 +450,8 @@ export function mountWorkspace(
       changedProperties ||
       changedColumns ||
       changedSort ||
-      changedFilters
+      changedFilters ||
+      changedGrouping
     ) {
       evaluate();
     }
@@ -596,6 +670,97 @@ export function mountWorkspace(
     });
   }
 
+  function setGrouping(group: Grouping | undefined): void {
+    choosingGroupTag = false;
+    if (!same(activeView().group, group)) updateView({ group });
+    else renderGrouping();
+  }
+
+  function renderGrouping(): void {
+    renderRegion(groupPane, () => {
+      const view = activeView();
+      const group = view.group;
+      const column = choosingGroupTag ? 'tags' : (group?.column ?? '');
+      const items: [Grouping['column'] | '', string][] = [
+        ['', t('noGrouping')],
+        ['year', t('year')],
+        ['type', t('type')],
+        ['tags', t('tags')],
+      ];
+      for (const property of preferences.properties) {
+        if (isGroupProperty(property)) items.push([`property:${property.key}`, property.key]);
+      }
+      if (column && !items.some(([value]) => value === column))
+        items.push([column, `${columnName(column)} (${t('unavailable')})`]);
+
+      const controls = element('div', 'zb-line');
+      const by = select(t('groupBy'), items, column);
+      focusKey(by, 'group');
+      by.addEventListener('change', () => {
+        const column = items.find(([value]) => value === by.value)?.[0];
+        if (column === 'tags') {
+          choosingGroupTag = true;
+          renderGrouping();
+          groupPane.querySelector<HTMLInputElement>('input')?.focus();
+        } else {
+          setGrouping(column ? { column, direction: group?.direction ?? 'asc' } : undefined);
+        }
+      });
+      const byLabel = element('label', 'zb-line');
+      byLabel.append(t('groupBy'), by);
+      controls.append(byLabel);
+
+      if (column === 'tags') {
+        const field = input(t('groupTag'), group?.column === 'tags' ? group.tag : '');
+        field.placeholder = t('chooseTag');
+        field.dataset.keepFocus = '';
+        focusKey(field, 'tag');
+        const suggestions = element('datalist');
+        suggestions.id = `${mountId}-group-tags`;
+        suggestTags(field, suggestions);
+        const commit = (): void => {
+          if (!field.isConnected) return;
+          const current = activeView();
+          if (current.id !== view.id || current.scope !== view.scope) return;
+          if (!choosingGroupTag && current.group?.column !== 'tags') return;
+          const tag = catalog?.tags.has(field.value) ? field.value : field.value.trim();
+          if (!catalog?.tags.has(tag)) return;
+          const next = {
+            column: 'tags',
+            tag,
+            direction: current.group?.direction ?? 'asc',
+          } as const;
+          if (same(current.group, next)) return;
+          delete field.dataset.keepFocus;
+          setGrouping(next);
+        };
+        field.addEventListener('change', () => queueMicrotask(commit));
+        field.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && !event.isComposing) commit();
+        });
+        controls.append(field, suggestions);
+      }
+      if (group && !choosingGroupTag) {
+        const direction = select(
+          t('groupDirection'),
+          [
+            ['asc', t('asc')],
+            ['desc', t('desc')],
+          ],
+          group.direction,
+        );
+        focusKey(direction, 'group-direction');
+        direction.addEventListener('change', () => {
+          const current = activeView().group;
+          if (current)
+            setGrouping({ ...current, direction: direction.value === 'desc' ? 'desc' : 'asc' });
+        });
+        controls.append(direction);
+      }
+      groupPane.replaceChildren(controls);
+    });
+  }
+
   function defaultOperand(column: Column, operator: Operator): string {
     if (operator === 'has' || operator === 'missing') return '';
     if (column === 'pdf' || propertyFor(column)?.type === 'checkbox') return 'true';
@@ -717,16 +882,7 @@ export function mountWorkspace(
     field.dataset.keepFocus = '';
     if (column === 'year' || property?.type === 'number') field.inputMode = 'decimal';
     if (column === 'added') field.placeholder = 'YYYY-MM-DD';
-    if (column === 'tags') {
-      field.setAttribute('list', tagValues.id);
-      const updateSuggestions = (): void => {
-        tagValues.replaceChildren(
-          ...matchingTags(field.value).map((label) => option(label, label)),
-        );
-      };
-      field.addEventListener('focus', updateSuggestions);
-      field.addEventListener('input', updateSuggestions);
-    }
+    if (column === 'tags') suggestTags(field, tagValues);
     return field;
   }
 
@@ -755,11 +911,36 @@ export function mountWorkspace(
     });
   }
 
-  function buildPropertyForm(): HTMLFormElement {
+  function buildPropertyForm(): [HTMLFormElement, () => void] {
     const form = element('form', 'zb-line');
     const key = input(t('propertyKey'));
     key.placeholder = t('propertyKey');
     key.required = true;
+    const hint = element('span', 'zb-line');
+    const explanation = element('span');
+    explanation.setAttribute('role', 'status');
+    const suggestion = button(
+      '',
+      () => {
+        const candidate = host.suggestPropertyKey(key.value, preferences.properties);
+        if (!candidate) return;
+        key.value = candidate;
+        updateHint();
+        key.focus();
+      },
+      'zb-key-hint',
+    );
+    function updateHint(): void {
+      const candidate = key.value.trim()
+        ? host.suggestPropertyKey(key.value, preferences.properties)
+        : undefined;
+      hint.hidden = !candidate;
+      explanation.textContent = candidate ? t('reservedKey') : '';
+      suggestion.textContent = candidate ? `${t('useKey')} “${candidate}”` : '';
+    }
+    hint.hidden = true;
+    hint.append(explanation, suggestion);
+    key.addEventListener('input', updateHint);
     const type = select(
       t('propertyType'),
       PROPERTY_TYPES.map((entry) => [entry, t(entry)]),
@@ -804,11 +985,12 @@ export function mountWorkspace(
         if (saved && key.value.trim() === name && values.value === startingValues) {
           key.value = '';
           values.value = '';
+          updateHint();
         }
       });
     });
-    form.append(key, type, values, submit);
-    return form;
+    form.append(key, hint, type, values, submit);
+    return [form, updateHint];
   }
 
   async function changeProperty(
@@ -977,6 +1159,207 @@ export function mountWorkspace(
     return form;
   }
 
+  function buildBulkPropertyForm(): [HTMLFormElement, () => void] {
+    const form = element('form', 'zb-line');
+    const picker = select(t('bulkProperty'), [], '');
+    const editor = element('div', 'zb-line');
+    let current: Property | undefined;
+    let valueForSubmit: (() => PropertyValue | undefined) | undefined;
+    form.append(picker, editor);
+
+    function drawValue(): void {
+      const property = preferences.properties.find(({ key }) => key === picker.value);
+      if (same(current, property)) return;
+      current = property;
+      valueForSubmit = undefined;
+      editor.replaceChildren();
+      if (!property) return;
+
+      const setValue = (value: PropertyValue): void => {
+        void runBulk({ kind: 'property', key: property.key, value });
+      };
+      if (property.type === 'text' || property.type === 'number') {
+        const field = input(t('bulkValue'));
+        field.placeholder = t('bulkValue');
+        field.required = true;
+        if (property.type === 'number') field.inputMode = 'decimal';
+        valueForSubmit = () => field.value.trim() || undefined;
+        editor.append(field);
+      } else if (property.type === 'multi-select') {
+        const field = select(
+          t('bulkValue'),
+          (property.options ?? []).map((value) => [value, value]),
+          '',
+        );
+        field.multiple = true;
+        field.size = Math.max(2, Math.min(4, field.length));
+        field.required = true;
+        valueForSubmit = () => {
+          const values = Array.from(field.selectedOptions, ({ value }) => value);
+          return values.length ? values : undefined;
+        };
+        editor.append(field);
+      } else {
+        const choices: [string, string][] = [['', t('chooseValue')]];
+        if (property.type === 'checkbox') choices.push(['true', t('yes')], ['false', t('no')]);
+        else for (const value of property.options ?? []) choices.push([value, value]);
+        const field = select(t('bulkValue'), choices, '');
+        field.addEventListener('change', () => {
+          const value = field.value;
+          if (!value) return;
+          setValue(property.type === 'checkbox' ? value === 'true' : value);
+          field.value = '';
+        });
+        editor.append(field);
+      }
+      if (valueForSubmit) {
+        const apply = element('button', '', t('bulkSet'));
+        apply.type = 'submit';
+        editor.append(apply);
+      }
+      editor.append(button(t('bulkClear'), () => setValue(null)));
+    }
+
+    function refreshProperties(): void {
+      const key = picker.value;
+      const properties = preferences.properties;
+      picker.replaceChildren(
+        option('', t('bulkProperty')),
+        ...properties.map(({ key }) => option(key, key)),
+      );
+      picker.value = properties.some((property) => property.key === key) ? key : '';
+      form.hidden = !properties.length;
+      drawValue();
+    }
+
+    picker.addEventListener('change', drawValue);
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = valueForSubmit?.();
+      if (current && value !== undefined)
+        void runBulk({ kind: 'property', key: current.key, value });
+    });
+    refreshProperties();
+    return [form, refreshProperties];
+  }
+
+  function buildBulkTagForm(): HTMLFormElement {
+    const form = element('form', 'zb-line');
+    const field = input(t('bulkTag'));
+    field.placeholder = t('tagName');
+    field.required = true;
+    const suggestions = element('datalist');
+    suggestions.id = `${mountId}-bulk-tags`;
+    suggestTags(field, suggestions);
+    const apply = (add: boolean): void => {
+      const tag = field.value.trim();
+      if (tag) void runBulk({ kind: 'tag', tag, add });
+    };
+    const add = element('button', '', t('addTag'));
+    add.type = 'submit';
+    form.append(
+      field,
+      suggestions,
+      add,
+      button(t('removeTag'), () => apply(false)),
+    );
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      apply(true);
+    });
+    return form;
+  }
+
+  async function runBulk(change: BulkChange): Promise<void> {
+    if (bulkPending || !selected.size) return;
+    const ids = [...selected];
+    bulkPending = true;
+    bulkActions.disabled = true;
+    showStatus('');
+    try {
+      const { changed, skipped, readOnly } = await host.bulk(ids, change);
+      showStatus(
+        zh
+          ? `已更新 ${changed} 条，跳过 ${skipped} 条（其中 ${readOnly} 条只读）。`
+          : `Updated ${changed} items; skipped ${skipped} (${readOnly} read-only).`,
+      );
+    } catch {
+      showStatus(t('actionError'), true);
+      refresh();
+    } finally {
+      bulkPending = false;
+      bulkActions.disabled = false;
+    }
+  }
+
+  function syncSelection(): void {
+    const total = result?.rows.length ?? 0;
+    bulkBar.hidden = !selected.size;
+    selectionCount.textContent = zh ? `已选择 ${selected.size} 条` : `${selected.size} selected`;
+    const header = tableWrap.querySelector<HTMLInputElement>('[data-select-all]');
+    if (header) {
+      header.disabled = !total;
+      header.checked = !!total && selected.size === total;
+      header.indeterminate = selected.size > 0 && selected.size < total;
+    }
+    for (const check of tableWrap.querySelectorAll<HTMLInputElement>('[data-select-item]')) {
+      check.checked = selected.has(Number(check.dataset.selectItem));
+      check.closest('tr')?.setAttribute('data-selected', String(check.checked));
+    }
+  }
+
+  function clearSelection(): void {
+    selected.clear();
+    selectionAnchor = undefined;
+    syncSelection();
+  }
+
+  function retainSelection(rows: readonly Row[]): void {
+    if (!selected.size && selectionAnchor === undefined) return;
+    const retained = new Set<number>();
+    let anchored = selectionAnchor === undefined;
+    for (const { id } of rows) {
+      if (id === selectionAnchor) anchored = true;
+      if (selected.has(id)) retained.add(id);
+      if (anchored && retained.size === selected.size) break;
+    }
+    for (const id of selected) if (!retained.has(id)) selected.delete(id);
+    if (!anchored) selectionAnchor = undefined;
+  }
+
+  function* displayedRows(): Iterable<Row> {
+    if (groups) {
+      for (const group of groups) {
+        if (!foldedGroups.has(group.value)) yield* group.rows;
+      }
+    } else if (result) {
+      yield* result.rows;
+    }
+  }
+
+  function selectItem(id: number, checked: boolean, extend: boolean): void {
+    const toggle = (id: number): void => {
+      if (checked) selected.add(id);
+      else selected.delete(id);
+    };
+    if (extend && selectionAnchor !== undefined && selectionAnchor !== id) {
+      const range: number[] = [];
+      for (const row of displayedRows()) {
+        const endpoint = row.id === selectionAnchor || row.id === id;
+        if (range.length && endpoint) {
+          range.push(row.id);
+          for (const target of range) toggle(target);
+          syncSelection();
+          return;
+        }
+        if (range.length || endpoint) range.push(row.id);
+      }
+    }
+    toggle(id);
+    selectionAnchor = id;
+    syncSelection();
+  }
+
   function refresh(): void {
     if (disposed) return;
     const scope = activeView().scope;
@@ -1004,20 +1387,32 @@ export function mountWorkspace(
   }
 
   function evaluate(): void {
+    const view = activeView();
     result = catalog
-      ? queryCatalog(catalog, activeView(), preferences.properties, options.language)
+      ? queryCatalog(catalog, view, preferences.properties, options.language)
       : undefined;
+    groups =
+      result && view.group && catalog
+        ? groupRows(result.rows, view.group, preferences.properties, catalog.tags, options.language)
+        : undefined;
     const invalid = result?.invalid.length ?? 0;
-    warning.hidden = !invalid;
-    warningText.textContent = invalid ? `${t('invalidFilters')} (${invalid}).` : '';
+    const invalidGroup = Boolean(result && view.group && !groups);
+    warning.hidden = !invalid && !invalidGroup;
+    filterWarning.hidden = !invalid;
+    filterWarningText.textContent = invalid ? `${t('invalidFilters')} (${invalid}).` : '';
+    groupWarning.hidden = !invalidGroup;
+    groupWarningText.textContent = invalidGroup ? t('invalidGrouping') : '';
+    if (result) retainSelection(result.rows);
     if (!closeEditor) renderTable();
+    else syncSelection();
   }
 
   function setPage(index: number): void {
     closeEditor?.(false);
+    const moved = page !== index;
     page = index;
     renderTable();
-    tableWrap.scrollTop = 0;
+    if (moved) tableWrap.scrollTop = 0;
   }
 
   function renderTable(): void {
@@ -1025,28 +1420,37 @@ export function mountWorkspace(
     const view = activeView();
     const items = result?.rows;
     const total = items?.length ?? 0;
-    page = Math.max(0, Math.min(page, Math.ceil(total / PAGE_SIZE) - 1));
+    let folded = 0;
+    let entries = total;
+    // A folded group occupies one slot so even an entirely folded page has a visible toggle.
+    if (groups && foldedGroups.size) {
+      for (const group of groups) {
+        if (foldedGroups.has(group.value)) {
+          folded++;
+          entries -= group.rows.length - 1;
+        }
+      }
+    }
+    page = Math.max(0, Math.min(page, Math.ceil(entries / PAGE_SIZE) - 1));
     const offset = page * PAGE_SIZE;
-    const end = Math.min(total, offset + PAGE_SIZE);
+    const end = Math.min(entries, offset + PAGE_SIZE);
     const columns = view.columns.filter(
       (column) => !column.startsWith('property:') || propertyFor(column),
     );
     pagination.hidden = !items || !columns.length || total === 0;
     previous.disabled = page === 0;
-    next.disabled = end >= total;
-    count.textContent = zh
-      ? `第 ${offset + 1}–${end} 条／共 ${total} 条`
-      : `${offset + 1}–${end} of ${total} items`;
+    next.disabled = end >= entries;
+    count.textContent = folded
+      ? zh
+        ? `第 ${offset + 1}–${end} 个可见条目或分组／共 ${entries} 个（${total} 条资料）`
+        : `${offset + 1}–${end} of ${entries} visible rows or groups · ${total} items`
+      : zh
+        ? `第 ${offset + 1}–${end} 条／共 ${total} 条`
+        : `${offset + 1}–${end} of ${total} items`;
 
     preserveFocus(tableWrap, () => {
-      if (!items || !total || !columns.length) {
-        const label = !items
-          ? retry.hidden
-            ? t('loading')
-            : t('loadError')
-          : !columns.length
-            ? t('noColumns')
-            : t('noItems');
+      if (!items || !columns.length) {
+        const label = !items ? (retry.hidden ? t('loading') : t('loadError')) : t('noColumns');
         const empty = element('div', 'zb-empty', label);
         empty.setAttribute('role', 'status');
         tableWrap.replaceChildren(empty);
@@ -1056,6 +1460,23 @@ export function mountWorkspace(
       table.setAttribute('aria-label', t('table'));
       const header = element('thead');
       const titles = element('tr');
+      const selectCell = element('th', 'zb-select-cell');
+      selectCell.scope = 'col';
+      const all = input(t('selectAll'));
+      all.type = 'checkbox';
+      all.dataset.selectAll = '';
+      focusKey(all, 'select-all');
+      all.addEventListener('change', () => {
+        if (!all.checked) {
+          clearSelection();
+          return;
+        }
+        selectionAnchor = undefined;
+        for (const { id } of result?.rows ?? []) selected.add(id);
+        syncSelection();
+      });
+      selectCell.append(all);
+      titles.append(selectCell);
       for (const column of columns) {
         const heading = element('th');
         heading.scope = 'col';
@@ -1083,10 +1504,70 @@ export function mountWorkspace(
       }
       header.append(titles);
       const body = element('tbody');
-      for (let i = offset; i < end; i++) body.append(renderRow(items[i]!, columns));
+      if (groups) {
+        const tag = view.group?.column === 'tags' ? view.group.tag : undefined;
+        let start = 0;
+        for (const group of groups) {
+          const folded = foldedGroups.has(group.value);
+          const groupEnd = start + (folded ? 1 : group.rows.length);
+          if (groupEnd > offset) {
+            body.append(renderGroupHeader(group, folded, start, columns.length + 1, tag));
+            if (!folded) {
+              const limit = Math.min(group.rows.length, end - start);
+              for (let index = Math.max(0, offset - start); index < limit; index++)
+                body.append(renderRow(group.rows[index]!, columns));
+            }
+          }
+          start = groupEnd;
+          if (start >= end) break;
+        }
+      } else {
+        for (let index = offset; index < end; index++)
+          body.append(renderRow(items[index]!, columns));
+      }
       table.append(header, body);
       tableWrap.replaceChildren(table);
+      if (!total) {
+        const empty = element('div', 'zb-empty', t('noItems'));
+        empty.setAttribute('role', 'status');
+        tableWrap.append(empty);
+      }
     });
+    syncSelection();
+  }
+
+  function renderGroupHeader(
+    group: RowGroup,
+    folded: boolean,
+    start: number,
+    colspan: number,
+    tag: string | undefined,
+  ): HTMLTableRowElement {
+    const { value, rows } = group;
+    const label =
+      value === null
+        ? t('missingGroup')
+        : tag
+          ? `${t(value ? 'withTag' : 'withoutTag')}: ${tag}`
+          : valueText(value);
+    const line = element('tr', 'zb-group');
+    const heading = element('td');
+    heading.colSpan = colspan;
+    const toggle = button(
+      `${folded ? '▸' : '▾'} ${label} (${rows.length})`,
+      () => {
+        if (folded) foldedGroups.delete(value);
+        else foldedGroups.add(value);
+        setPage(Math.floor(start / PAGE_SIZE));
+      },
+      'zb-group-toggle',
+      `${label} (${rows.length})`,
+    );
+    toggle.setAttribute('aria-expanded', String(!folded));
+    focusKey(toggle, `group:${JSON.stringify(value)}`);
+    heading.append(toggle);
+    line.append(heading);
+    return line;
   }
 
   function openRow(row: Row, pdf: boolean): void {
@@ -1108,8 +1589,17 @@ export function mountWorkspace(
     });
     line.addEventListener('dblclick', (event) => {
       const target = event.target as Element | null;
-      if (!target?.closest('button, input, select, label, .zb-editor')) openRow(row, row.pdf);
+      if (!target?.closest('button, input, select, label, .zb-editor, .zb-select-cell'))
+        openRow(row, row.pdf);
     });
+    const selectCell = element('td', 'zb-select-cell');
+    const check = input(scopedName(t('selectItem'), row.title || t('untitled')));
+    check.type = 'checkbox';
+    check.dataset.selectItem = String(row.id);
+    focusKey(check, `select:${row.id}`);
+    check.addEventListener('click', (event) => selectItem(row.id, check.checked, event.shiftKey));
+    selectCell.append(check);
+    line.append(selectCell);
     for (const column of columns) line.append(renderCell(row, column));
     return line;
   }
@@ -1355,6 +1845,15 @@ export function mountWorkspace(
     return matching;
   }
 
+  function suggestTags(field: HTMLInputElement, list: HTMLDataListElement): void {
+    field.setAttribute('list', list.id);
+    const update = (): void => {
+      list.replaceChildren(...matchingTags(field.value).map((label) => option(label, label)));
+    };
+    field.addEventListener('focus', update);
+    field.addEventListener('input', update);
+  }
+
   function closeOnBlur(controls: HTMLElement, close: (restore: boolean) => void): void {
     controls.addEventListener('focusout', (event) => {
       if (event.relatedTarget && !controls.contains(event.relatedTarget as Node)) close(false);
@@ -1423,11 +1922,13 @@ export function mountWorkspace(
     field.focus();
   }
 
-  propertyPane.append(buildPropertyForm(), propertyList);
+  const [propertyForm, updatePropertyHint] = buildPropertyForm();
+  propertyPane.append(propertyForm, propertyList);
   renderTabs();
   renderScope();
   renderColumns();
   renderFilters();
+  renderGrouping();
   renderProperties();
   const unsubscribe = host.subscribe((kind) => {
     if (disposed) return;
@@ -1443,6 +1944,7 @@ export function mountWorkspace(
     if (disposed) return;
     disposed = true;
     unsubscribe();
+    disposeSync?.();
     for (const [region, listener] of pendingRenders)
       region.removeEventListener('focusout', listener);
     pendingRenders.clear();

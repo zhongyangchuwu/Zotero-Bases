@@ -274,6 +274,9 @@ describe('catalog sorting', () => {
         row(5, { extra: 'Confidence: -0' }),
         row(6, { extra: 'Confidence: 1e-400' }),
         row(7, { extra: 'Confidence: malformed' }),
+        row(8, { extra: 'Confidence: 10' }),
+        row(9, { extra: 'Confidence: 2' }),
+        row(10, { extra: 'Confidence: 4.50' }),
       ],
       tags: new Set(),
     };
@@ -284,7 +287,7 @@ describe('catalog sorting', () => {
       properties,
       'en-US',
     );
-    expect(ascending.rows.map(({ id }) => id)).toEqual([3, 5, 6, 4, 2, 1, 7]);
-    expect(descending.rows.map(({ id }) => id)).toEqual([2, 4, 6, 5, 3, 1, 7]);
+    expect(ascending.rows.map(({ id }) => id)).toEqual([3, 5, 6, 9, 10, 8, 4, 2, 1, 7]);
+    expect(descending.rows.map(({ id }) => id)).toEqual([2, 4, 8, 10, 9, 6, 5, 3, 1, 7]);
   });
 });

@@ -3,6 +3,7 @@ import type {
   Column,
   ConfigChange,
   Filter,
+  Grouping,
   Preferences,
   Property,
   PropertyType,
@@ -72,7 +73,28 @@ function filter(value: unknown): value is Filter {
   );
 }
 
-function view(value: unknown): View | undefined {
+function grouping(value: unknown): Grouping | undefined {
+  if (!object(value) || !isDirection(value.direction)) return undefined;
+  const { column, direction } = value;
+  if (column === 'tags')
+    return typeof value.tag === 'string' && value.tag.trim()
+      ? { column, tag: value.tag, direction }
+      : undefined;
+  if (column === 'year' || column === 'type') return { column, direction };
+  if (typeof column === 'string' && /^property:.+/u.test(column))
+    return { column: column as `property:${string}`, direction };
+  return undefined;
+}
+
+function isDirection(value: unknown): value is Grouping['direction'] {
+  return value === 'asc' || value === 'desc';
+}
+
+function validSort(value: unknown): value is View['sort'] {
+  return object(value) && column(value.column) && isDirection(value.direction);
+}
+
+function view(value: unknown, strict = false): View | undefined {
   if (
     !object(value) ||
     typeof value.id !== 'string' ||
@@ -83,17 +105,32 @@ function view(value: unknown): View | undefined {
   ) {
     return undefined;
   }
-  const sort = value.sort;
+  const { sort } = value;
+  const group = grouping(value.group);
+  if (
+    strict &&
+    (!Array.isArray(value.columns) ||
+      !value.columns.every(column) ||
+      !validSort(sort) ||
+      !Array.isArray(value.filters) ||
+      !value.filters.every(filter) ||
+      (value.group !== undefined && !group))
+  )
+    return undefined;
   return {
     id: value.id,
     name: value.name,
     scope: value.scope,
     columns: Array.isArray(value.columns) ? value.columns.filter(column) : NATIVE_COLUMNS,
-    sort:
-      object(sort) && column(sort.column) && (sort.direction === 'asc' || sort.direction === 'desc')
-        ? { column: sort.column, direction: sort.direction }
-        : { column: 'title', direction: 'asc' },
-    filters: Array.isArray(value.filters) ? value.filters.filter(filter) : [],
+    sort: validSort(sort)
+      ? { column: sort.column, direction: sort.direction }
+      : { column: 'title', direction: 'asc' },
+    filters: Array.isArray(value.filters)
+      ? value.filters
+          .filter(filter)
+          .map(({ column, operator, value }) => ({ column, operator, value }))
+      : [],
+    ...(group ? { group } : {}),
   };
 }
 
@@ -105,7 +142,57 @@ function propertyType(value: unknown): value is PropertyType {
   return typeof value === 'string' && Object.hasOwn(propertyTypes, value);
 }
 
-export function createConfig(prefs: Prefs, initialScope: () => string, validate: Validate) {
+function property(raw: unknown, validate: Validate): Property | undefined {
+  if (!object(raw)) return undefined;
+  const { key, type, options } = raw;
+  if (
+    typeof key !== 'string' ||
+    !propertyType(type) ||
+    (options !== undefined &&
+      (!Array.isArray(options) || !options.every((option) => typeof option === 'string')))
+  )
+    return undefined;
+  try {
+    return validate({ key, type, options });
+  } catch {
+    return undefined;
+  }
+}
+
+/** A malformed remote record must not be applied as a partial library configuration. */
+export function decodeSyncSnapshot(value: unknown, validate: Validate) {
+  if (
+    !object(value) ||
+    !Array.isArray(value.schema) ||
+    !Array.isArray(value.views) ||
+    !value.views.length
+  )
+    return undefined;
+  const schema: Property[] = [];
+  const keys = new Set<string>();
+  for (const raw of value.schema) {
+    const decoded = property(raw, validate);
+    if (!decoded || keys.has(keyID(decoded.key))) return undefined;
+    keys.add(keyID(decoded.key));
+    schema.push(decoded);
+  }
+  const views: View[] = [];
+  const ids = new Set<string>();
+  for (const raw of value.views) {
+    const decoded = view(raw, true);
+    if (!decoded || ids.has(decoded.id)) return undefined;
+    ids.add(decoded.id);
+    views.push(decoded);
+  }
+  return { schema, views };
+}
+
+export function createConfig(
+  prefs: Prefs,
+  initialScope: () => string,
+  validate: Validate,
+  { initializeDefault = true } = {},
+) {
   function views(value: unknown, active: unknown): Pick<Preferences, 'views' | 'active'> {
     const byID = new Map<string, View>();
     if (Array.isArray(value)) {
@@ -136,7 +223,7 @@ export function createConfig(prefs: Prefs, initialScope: () => string, validate:
   }
 
   // Persist the first scope once; later windows share the same saved default.
-  if (prefs.get(VIEWS_PREF, true) === undefined)
+  if (initializeDefault && prefs.get(VIEWS_PREF, true) === undefined)
     prefs.set(VIEWS_PREF, JSON.stringify(views([], null)), true);
 
   function readProperties(): readonly Property[] {
@@ -144,22 +231,8 @@ export function createConfig(prefs: Prefs, initialScope: () => string, validate:
     const properties = new Map<string, Property>();
     if (Array.isArray(rawSchema)) {
       for (const raw of rawSchema) {
-        if (!object(raw)) continue;
-        const { key, type, options } = raw;
-        if (
-          typeof key !== 'string' ||
-          !propertyType(type) ||
-          (options !== undefined &&
-            (!Array.isArray(options) || !options.every((option) => typeof option === 'string')))
-        ) {
-          continue;
-        }
-        try {
-          const property = validate({ key, type, options });
-          properties.set(keyID(property.key), property);
-        } catch {
-          // A malformed or newly reserved definition must not authorize an Extra write.
-        }
+        const decoded = property(raw, validate);
+        if (decoded) properties.set(keyID(decoded.key), decoded);
       }
     }
     return [...properties.values()];
@@ -175,6 +248,18 @@ export function createConfig(prefs: Prefs, initialScope: () => string, validate:
       };
     },
     writeViews,
+    applySync(snapshot: {
+      readonly schema: readonly Property[];
+      readonly views: readonly View[];
+    }): void {
+      const saved = parse(prefs.get(VIEWS_PREF, true));
+      prefs.set(SCHEMA_PREF, JSON.stringify(snapshot.schema), true);
+      prefs.set(
+        VIEWS_PREF,
+        JSON.stringify(views(snapshot.views, object(saved) ? saved.active : undefined)),
+        true,
+      );
+    },
     writeSchema(properties: readonly Property[]): void {
       prefs.set(SCHEMA_PREF, JSON.stringify(properties), true);
     },
