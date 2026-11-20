@@ -180,7 +180,9 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
         extractExtraFields(extra) {
           return {
             itemType: null,
-            fields: new Map(extra.startsWith('Special CSL Field:') ? [['mapped', 'book']] : []),
+            fields: new Map(
+              /^(?:Special CSL Field|Status):/u.test(extra) ? [['mapped', 'book']] : [],
+            ),
             creators: [],
           };
         },
@@ -308,6 +310,172 @@ describe('Zotero Bases host', () => {
       { tag: 'Keep', type: 0 },
     ]);
     expect(item.saveTx).toHaveBeenCalledTimes(3);
+  });
+
+  it('suggests only genuinely reserved keys using both built-in and native guards', () => {
+    const { host, zotero } = harness();
+    expect(host.suggestPropertyKey('Status', [])).toBe('Reading Status');
+    expect(host.suggestPropertyKey('DOI', [])).toBe('Reference DOI');
+    expect(host.suggestPropertyKey('Special CSL Field', [])).toBe('Reference Special CSL Field');
+    expect(
+      host.suggestPropertyKey('Status', [
+        { key: 'reading status', type: 'text' },
+        { key: 'Reading Status 2', type: 'text' },
+      ]),
+    ).toBe('Reading Status 3');
+    expect(host.suggestPropertyKey('Ordinary', [])).toBeUndefined();
+    expect(host.suggestPropertyKey('Bad: key', [])).toBeUndefined();
+    expect(
+      host.suggestPropertyKey('Ordinary', [{ key: 'ordinary', type: 'text' }]),
+    ).toBeUndefined();
+    vi.spyOn(zotero.Utilities.Internal, 'extractExtraFields').mockImplementation(() => {
+      throw new Error('Native helper failed');
+    });
+    expect(() => host.suggestPropertyKey('Another key', [])).toThrow('Native helper failed');
+  });
+
+  it('validates suggested suffixes against native fields as well as existing names', () => {
+    const { host, zotero } = harness();
+    const extract = zotero.Utilities.Internal.extractExtraFields;
+    vi.spyOn(zotero.Utilities.Internal, 'extractExtraFields').mockImplementation((extra) => {
+      if (extra.startsWith('Reference DOI:')) {
+        return { itemType: null, fields: new Map([['mapped', 'book']]), creators: [] };
+      }
+      return extract(extra);
+    });
+    expect(host.suggestPropertyKey('DOI', [])).toBe('Reference DOI 2');
+    expect(host.suggestPropertyKey('DOI', [{ key: 'DOI', type: 'text' }])).toBeUndefined();
+  });
+
+  it('bulk edits distinct explicit items with partial success and validates before any writes', async () => {
+    const editable = nativeItem(1, 1, 'DOI: keep\nReading Stage: To Read');
+    const locked = nativeItem(2, 9, 'DOI: locked\nReading Stage: To Read');
+    const failed = nativeItem(3, 8, 'Reading Stage: To Read', { fail: true });
+    const unchanged = nativeItem(4, 8, 'Reading Stage: Done');
+    const stale = nativeItem(5, 8, 'Reading Stage: To Read', { deleted: true });
+    const { host } = harness([editable, locked, failed, unchanged, stale]);
+    await host.change({ kind: 'define', property: stage });
+    await expect(
+      host.bulk([1, 2], {
+        kind: 'property',
+        key: stage.key,
+        value: ['Unknown'],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      host.bulk([1, 2], {
+        kind: 'property',
+        key: stage.key,
+        value: 'invalid shape',
+      }),
+    ).rejects.toThrow();
+    expect(editable.saveTx).not.toHaveBeenCalled();
+    expect(locked.saveTx).not.toHaveBeenCalled();
+    await expect(
+      host.bulk([1, 1, 2, 3, 4, 5, 999], {
+        kind: 'property',
+        key: stage.key,
+        value: ['Done'],
+      }),
+    ).resolves.toEqual({ changed: 1, skipped: 4, readOnly: 1 });
+    expect(editable.savedExtra()).toBe('DOI: keep\nReading Stage: Done');
+    expect(locked.savedExtra()).toBe('DOI: locked\nReading Stage: To Read');
+    expect(failed.savedExtra()).toBe('Reading Stage: To Read');
+    expect(unchanged.saveTx).not.toHaveBeenCalled();
+    expect(editable.saveTx).toHaveBeenCalledTimes(1);
+  });
+
+  it('bulk changes native tags without rewriting automatic tags or counting no-ops', async () => {
+    const editable = nativeItem(1, 1);
+    const locked = nativeItem(2, 9);
+    const { host } = harness([editable, locked]);
+    await expect(host.bulk([1, 2], { kind: 'tag', tag: 'automatic', add: true })).resolves.toEqual({
+      changed: 0,
+      skipped: 0,
+      readOnly: 0,
+    });
+    await expect(
+      host.bulk([1, 2, 1, 999], { kind: 'tag', tag: ' New ', add: true }),
+    ).resolves.toEqual({ changed: 1, skipped: 2, readOnly: 1 });
+    expect(editable.getTags()).toEqual([
+      { tag: 'automatic', type: 1 },
+      { tag: 'New', type: 0 },
+    ]);
+    expect(locked.getTags()).toEqual([{ tag: 'automatic', type: 1 }]);
+    await expect(host.bulk([1], { kind: 'tag', tag: 'New', add: false })).resolves.toEqual({
+      changed: 1,
+      skipped: 0,
+      readOnly: 0,
+    });
+    await expect(host.bulk([1], { kind: 'tag', tag: ' ', add: true })).rejects.toThrow();
+  });
+
+  it('serializes bulk edits and checks permissions again after loading each item', async () => {
+    const first = nativeItem(1, 8);
+    const second = nativeItem(2, 8);
+    const { host, zotero, prefs, owner, libraries } = harness([first, second]);
+    const popout = createWorkspaceHost(zotero, prefs, owner);
+    const started = new Promise<() => void>((resolve) => {
+      first.saveTx.mockImplementationOnce(() => new Promise<void>((resume) => resolve(resume)));
+    });
+    const bulk = host.bulk([1, 2], { kind: 'tag', tag: 'Bulk', add: true });
+    const resume = await started;
+    const next = expect(popout.changeTag(1, 'After', true)).rejects.toThrow();
+    libraries[1]!.editable = false;
+    resume();
+    await expect(bulk).resolves.toEqual({ changed: 1, skipped: 1, readOnly: 1 });
+    await next;
+    expect(second.saveTx).not.toHaveBeenCalled();
+  });
+
+  it('coalesces data notifications across hosts during bulk while retaining per-item saves', async () => {
+    const first = nativeItem(1, 1);
+    const second = nativeItem(2, 1);
+    const { host, zotero, prefs, owner, nativeObservers } = harness([first, second]);
+    const other = createWorkspaceHost(zotero, prefs, owner);
+    const listener = vi.fn();
+    const otherListener = vi.fn();
+    const stop = host.subscribe(listener);
+    const stopOther = other.subscribe(otherListener);
+    for (const item of [first, second]) {
+      item.saveTx.mockImplementation(async () => {
+        for (const { observer } of nativeObservers.values()) observer.notify();
+      });
+    }
+    await host.bulk([1, 2], { kind: 'tag', tag: 'new', add: true });
+    expect(first.saveTx).toHaveBeenCalledTimes(1);
+    expect(second.saveTx).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls).toEqual([['data']]);
+    expect(otherListener.mock.calls).toEqual([['data']]);
+    stop();
+    stopOther();
+  });
+
+  it('excludes sync carriers only after item data is loaded, including mutations and cleanup', async () => {
+    const carrier = nativeItem(1, 1, 'Zotero Bases Sync: v1\nReading Stage: To Read');
+    const paper = nativeItem(2, 1, 'Reading Stage: To Read');
+    const { host, loadDataTypes } = harness([carrier, paper], [carrier, paper]);
+    const loaded = new Set<number>();
+    const getField = carrier.getField;
+    vi.spyOn(carrier, 'getField').mockImplementation((field) => {
+      if (field === 'extra' && !loaded.has(carrier.id)) throw new Error('Unloaded item data');
+      return getField(field);
+    });
+    loadDataTypes.mockImplementation(async (items) => {
+      for (const item of items) loaded.add(item.id);
+    });
+    expect((await host.load('all')).rows.map(({ id }) => id)).toEqual([2]);
+    loaded.clear();
+    expect((await host.load('group:73/CHILD007')).rows.map(({ id }) => id)).toEqual([2]);
+    await host.change({ kind: 'define', property: stage });
+    await expect(host.bulk([1, 2], { kind: 'tag', tag: 'new', add: true })).resolves.toEqual({
+      changed: 1,
+      skipped: 1,
+      readOnly: 0,
+    });
+    await expect(host.setProperty(1, stage.key, ['Done'])).rejects.toThrow();
+    await host.change({ kind: 'delete-property', key: stage.key, clean: true });
+    expect(carrier.savedExtra()).toContain('Reading Stage: To Read');
   });
 
   it('renames a literal option across scopes with partial success and leaves unmatched rows unchanged', async () => {

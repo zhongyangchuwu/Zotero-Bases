@@ -1,5 +1,19 @@
+import { createConfig, decodeSyncSnapshot, SCHEMA_PREF, VIEWS_PREF } from './config';
 import type { WorkspaceHost } from './contracts';
-import { createWorkspaceHost, type LibraryOwner, type Prefs, type ZoteroData } from './data';
+import {
+  createPropertyValidation,
+  createWorkspaceHost,
+  type LibraryOwner,
+  type Prefs,
+  type ZoteroData,
+} from './data';
+import { createSyncController, type SyncPort } from './sync';
+import {
+  createNativeSyncTransport,
+  type NativeSyncIO,
+  type NativeSyncPaths,
+  type NativeSyncZotero,
+} from './sync-native';
 import { mountWorkspace } from './workspace';
 
 const NAME = 'Zotero Bases';
@@ -54,24 +68,28 @@ interface Session {
   detach: () => void;
 }
 
-declare const Zotero: ZoteroData & {
-  readonly Prefs: Prefs;
-  readonly locale: string;
-  readonly MenuManager: {
-    registerMenu(options: {
-      menuID: string;
-      pluginID: string;
-      target: 'main/menubar/tools';
-      menus: readonly {
-        menuType: 'menuitem';
-        onShowing(event: Event, context: MenuContext): void;
-        onCommand(event: Event, context: MenuContext): void;
-      }[];
-    }): string | false;
-    unregisterMenu(id: string): boolean;
+declare const Zotero: ZoteroData &
+  NativeSyncZotero & {
+    readonly Prefs: Prefs;
+    readonly initializationPromise: Promise<unknown>;
+    readonly locale: string;
+    readonly MenuManager: {
+      registerMenu(options: {
+        menuID: string;
+        pluginID: string;
+        target: 'main/menubar/tools';
+        menus: readonly {
+          menuType: 'menuitem';
+          onShowing(event: Event, context: MenuContext): void;
+          onCommand(event: Event, context: MenuContext): void;
+        }[];
+      }): string | false;
+      unregisterMenu(id: string): boolean;
+    };
+    logError(error: unknown): void;
   };
-  logError(error: unknown): void;
-};
+declare const IOUtils: NativeSyncIO;
+declare const PathUtils: NativeSyncPaths;
 declare const Services: {
   io: { newURI(uri: string): object };
   ww: {
@@ -95,6 +113,37 @@ declare const Components: {
 const sessions = new Map<Window, Session>();
 let registration: { destruct(): void } | undefined;
 let menu: string | undefined;
+let librarySync: (SyncPort & { stop(): void }) | undefined;
+
+function startLibrarySync(): void {
+  if (librarySync) return;
+  const prefs = Zotero.Prefs;
+  const { validate } = createPropertyValidation(Zotero);
+  const config = createConfig(prefs, () => 'user', validate, { initializeDefault: false });
+  librarySync = createSyncController({
+    prefs,
+    transport: createNativeSyncTransport(Zotero, IOUtils, PathUtils),
+    readSnapshot: () => {
+      const { properties, views } = config.settings();
+      return { schema: properties, views };
+    },
+    decodeSnapshot: (value) => decodeSyncSnapshot(value, validate),
+    applySnapshot: config.applySync,
+    subscribeSettings: (listener) => {
+      const schema = prefs.registerObserver(SCHEMA_PREF, listener, true);
+      const views = prefs.registerObserver(VIEWS_PREF, listener, true);
+      return () => {
+        prefs.unregisterObserver(schema);
+        prefs.unregisterObserver(views);
+      };
+    },
+    setTimer: (fn, delay) => {
+      const id = setTimeout(fn, delay);
+      return () => clearTimeout(id);
+    },
+    logError: (error) => Zotero.logError(error),
+  });
+}
 
 function language(): 'zh-CN' | 'en' {
   return /^zh-(?:CN|Hans)(?:-|$)/i.test(Zotero.locale) ? 'zh-CN' : 'en';
@@ -154,7 +203,11 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   };
   try {
     update();
-    const unmount = mountWorkspace(root, session.host, { language: language(), popOut });
+    const unmount = mountWorkspace(root, session.host, {
+      language: language(),
+      popOut,
+      sync: librarySync,
+    });
     media.addEventListener('change', update);
     return {
       root,
@@ -237,6 +290,7 @@ function openTab(owner: Window): void {
   if (!menu || owner.closed) return;
   const session = sessionFor(owner);
   if (!session) return;
+  guarded(startLibrarySync);
   if (session.tab) {
     session.tabs.select(session.tab.id);
     session.tab.root.focus();
@@ -302,7 +356,13 @@ export function startup({ id, rootURI }: RootData): void {
           onShowing: (_, { menuElem }) => menuElem.setAttribute('label', NAME),
           onCommand: (_, { menuElem }) => {
             const owner = menuElem.ownerDocument.defaultView;
-            if (owner) guarded(() => openTab(owner));
+            if (owner)
+              void Zotero.initializationPromise
+                .then(() => {
+                  if (registration !== registered || owner.closed) return;
+                  guarded(() => openTab(owner));
+                })
+                .catch((error) => Zotero.logError(error));
           },
         },
       ],
@@ -310,6 +370,11 @@ export function startup({ id, rootURI }: RootData): void {
     if (!menuID) throw new Error('Zotero refused the Bases Tools menu');
     menu = menuID;
     registration = registered;
+    void Zotero.initializationPromise
+      .then(() => {
+        if (registration === registered) guarded(startLibrarySync);
+      })
+      .catch((error) => Zotero.logError(error));
   } catch (error) {
     registered.destruct();
     throw error;
@@ -325,6 +390,9 @@ export function shutdown(): void {
   menu = undefined;
   if (previous) guarded(() => void Zotero.MenuManager.unregisterMenu(previous));
   for (const owner of sessions.keys()) closeSession(owner, true);
+  const sync = librarySync;
+  librarySync = undefined;
+  if (sync) guarded(() => sync.stop());
   const chrome = registration;
   registration = undefined;
   if (chrome) guarded(() => chrome.destruct());
