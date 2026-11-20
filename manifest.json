@@ -7,7 +7,7 @@
   "applications": {
     "zotero": {
       "id": "zotero-bases@zhongyangchuwu.github.io",
-      "update_url": "https://raw.githubusercontent.com/zhongyangchuwu/Zotero-Bases/main/updates.json",
+      "update_url": "https://github.com/zhongyangchuwu/Zotero-Bases/releases/latest/download/updates.json",
       "strict_min_version": "10.0",
       "strict_max_version": "10.0.*"
     }

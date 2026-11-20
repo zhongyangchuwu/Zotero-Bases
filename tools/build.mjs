@@ -1,5 +1,6 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { build } from 'esbuild';
+import { createUpdateFeed } from './release-metadata.mjs';
 import { zip } from './zip.mjs';
 
 const result = await build({
@@ -18,9 +19,20 @@ const result = await build({
 for (const input of Object.keys(result.metafile.inputs)) {
   if (!input.startsWith('src/')) throw new Error(`Unexpected runtime dependency: ${input}`);
 }
-const paths = ['LICENSE', 'content/window.xhtml', 'manifest.json'];
-const files = await Promise.all(paths.map(async (path) => [path, await readFile(path)]));
-files.push(['bootstrap.js', Buffer.from(result.outputFiles[0].contents)]);
-files.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-await writeFile('zotero-bases.xpi', zip(files));
-console.log('Built zotero-bases.xpi');
+const [license, popup, manifest] = await Promise.all(
+  ['LICENSE', 'content/window.xhtml', 'manifest.json'].map((path) => readFile(path)),
+);
+const files = [
+  ['LICENSE', license],
+  ['bootstrap.js', Buffer.from(result.outputFiles[0].contents)],
+  ['content/window.xhtml', popup],
+  ['manifest.json', manifest],
+];
+const xpi = zip(files);
+const updates = createUpdateFeed(JSON.parse(manifest), xpi);
+await mkdir('build', { recursive: true });
+await Promise.all([
+  writeFile('zotero-bases.xpi', xpi),
+  writeFile('build/updates.json', JSON.stringify(updates, null, 2) + '\n'),
+]);
+console.log('Built zotero-bases.xpi and build/updates.json');
