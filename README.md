@@ -8,7 +8,11 @@ Zotero Bases 是独立的 Zotero 10 插件，把文库变成可编辑的表格�
 
 [使用指南](docs/GUIDE.md)
 
-## 构建和安装
+## 下载与安装
+
+从 [GitHub Releases](https://github.com/zhongyangchuwu/Zotero-Bases/releases/latest) 下载 `zotero-bases.xpi`（不是源码压缩包）。在 Zotero 打开 **工具 → 插件**，从齿轮菜单选择从文件安装并打开该文件。
+
+## 从源码构建
 
 需要 Node.js 24 或更新版本。
 
@@ -17,6 +21,6 @@ npm ci --ignore-scripts
 npm run verify
 ```
 
-在 Zotero 打开 **工具 → 插件**，从齿轮菜单选择从文件安装，打开生成的 `zotero-bases.xpi`。也可从通过验证的 GitHub Actions 运行下载 `zotero-bases` 构建产物。
+构建生成的 `zotero-bases.xpi` 也可按上述方式安装。
 
 [AGPL-3.0](LICENSE)

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { crc32, inflateRawSync } from 'node:zlib';
+import { crc32 } from 'node:zlib';
+import { createUpdateFeed } from './release-metadata.mjs';
 
 const xpi = await readFile('zotero-bases.xpi');
 const end = xpi.length - 22;
@@ -15,7 +16,7 @@ for (let i = 0; i < count; i++) {
   assert.equal(xpi.readUInt32LE(offset), 0x04034b50);
   assert.equal(xpi.readUInt32LE(pointer + 42), offset);
   assert.deepEqual(xpi.subarray(pointer + 6, pointer + 32), xpi.subarray(offset + 4, offset + 30));
-  assert.equal(xpi.readUInt16LE(pointer + 10), 8);
+  assert.equal(xpi.readUInt16LE(pointer + 10), 0);
   assert.equal(xpi.readUInt32LE(pointer + 12), 33 << 16);
   assert.equal(xpi.readUInt32LE(pointer + 30), 0); // No extra fields or comments.
   const length = xpi.readUInt16LE(pointer + 28);
@@ -23,7 +24,7 @@ for (let i = 0; i < count; i++) {
   assert.deepEqual(name, xpi.subarray(offset + 30, offset + 30 + length));
   const dataStart = offset + 30 + length;
   offset = dataStart + xpi.readUInt32LE(pointer + 20);
-  const data = inflateRawSync(xpi.subarray(dataStart, offset));
+  const data = xpi.subarray(dataStart, offset);
   assert.equal(data.length, xpi.readUInt32LE(pointer + 24));
   assert.equal(crc32(data), xpi.readUInt32LE(pointer + 16));
   assert(!actual.has(name.toString()), 'Duplicate ZIP member');
@@ -42,10 +43,9 @@ for (const path of ['LICENSE', 'content/window.xhtml', 'manifest.json']) {
 const manifest = JSON.parse(actual.get('manifest.json'));
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 const zotero = manifest.applications.zotero;
-const updates = JSON.parse(await readFile('updates.json', 'utf8'));
+const updates = JSON.parse(await readFile('build/updates.json', 'utf8'));
 assert.equal(manifest.version, pkg.version);
-assert.equal(new URL(zotero.update_url).protocol, 'https:');
+assert.deepEqual(updates, createUpdateFeed(manifest, xpi), 'Update feed does not match the XPI');
 assert.equal(zotero.strict_min_version, '10.0');
 assert.equal(zotero.strict_max_version, '10.0.*');
-assert(Array.isArray(updates.addons[zotero.id]?.updates), 'Missing update feed for add-on ID');
 console.log(`Verified ${count} XPI members, version ${manifest.version}`);

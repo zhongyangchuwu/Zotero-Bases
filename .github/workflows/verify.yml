@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -14,14 +15,63 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
+      - name: Verify release ref
+        if: github.ref_type == 'tag'
+        env:
+          PROTECTED: ${{ github.ref_protected }}
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != zhongyangchuwu/Zotero-Bases || "$PROTECTED" != true ]]; then
+            echo "::error::Stable releases require a protected tag in Zotero-Bases."
+            exit 1
+          fi
+          expected="v$(node -p 'require("./manifest.json").version')"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "::error::Release tag must match the manifest version: $expected."
+            exit 1
+          fi
+          main=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          if [[ "$(git rev-parse HEAD)" != "$main" ]]; then
+            echo "::error::Tag the current main commit to publish a stable release."
+            exit 1
+          fi
       - run: npm ci --ignore-scripts
       - run: npm run verify
       - uses: actions/upload-artifact@v4
         with:
           name: zotero-bases
-          path: zotero-bases.xpi
+          path: |
+            zotero-bases.xpi
+            build/updates.json
           if-no-files-found: error
+
+  release:
+    name: Publish stable release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: verify
+    runs-on: ubuntu-latest
+    concurrency: stable-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zotero-bases
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --exclude-drafts \
+            --exclude-pre-releases --json tagName --jq '.[0].tagName // empty')
+          if [[ -n "$latest" ]] && { [[ "$latest" == "$GITHUB_REF_NAME" ]] ||
+            ! printf '%s\n' "$latest" "$GITHUB_REF_NAME" | sort -V -C; }; then
+            echo "::error::Release must be newer than $latest."
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" zotero-bases.xpi build/updates.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --latest --generate-notes
