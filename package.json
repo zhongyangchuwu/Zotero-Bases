@@ -1,0 +1,26 @@
+{
+  "name": "zotero-bases",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "format": "prettier --write src tests tools *.json .github/workflows",
+    "format:check": "prettier --check src tests tools *.json .github/workflows",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node tools/build.mjs",
+    "verify": "npm run format:check && npm run typecheck && npm test && npm run build && node tools/check-xpi.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "esbuild": "0.28.2",
+    "jsdom": "26.1.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.3"
+  }
+}
