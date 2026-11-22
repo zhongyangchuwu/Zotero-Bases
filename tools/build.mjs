@@ -19,12 +19,15 @@ const result = await build({
 for (const input of Object.keys(result.metafile.inputs)) {
   if (!input.startsWith('src/')) throw new Error(`Unexpected runtime dependency: ${input}`);
 }
-const [license, popup, manifest] = await Promise.all(
-  ['LICENSE', 'content/window.xhtml', 'manifest.json'].map((path) => readFile(path)),
+const [license, preferences, popup, manifest] = await Promise.all(
+  ['LICENSE', 'content/preferences.xhtml', 'content/window.xhtml', 'manifest.json'].map((path) =>
+    readFile(path),
+  ),
 );
 const files = [
   ['LICENSE', license],
   ['bootstrap.js', Buffer.from(result.outputFiles[0].contents)],
+  ['content/preferences.xhtml', preferences],
   ['content/window.xhtml', popup],
   ['manifest.json', manifest],
 ];

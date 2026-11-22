@@ -35,9 +35,14 @@ assert.equal(offset, directory);
 assert.equal(pointer, end);
 assert.deepEqual(
   [...actual.keys()],
-  ['LICENSE', 'bootstrap.js', 'content/window.xhtml', 'manifest.json'],
+  ['LICENSE', 'bootstrap.js', 'content/preferences.xhtml', 'content/window.xhtml', 'manifest.json'],
 );
-for (const path of ['LICENSE', 'content/window.xhtml', 'manifest.json']) {
+for (const path of [
+  'LICENSE',
+  'content/preferences.xhtml',
+  'content/window.xhtml',
+  'manifest.json',
+]) {
   assert.deepEqual(actual.get(path), await readFile(path));
 }
 const manifest = JSON.parse(actual.get('manifest.json'));

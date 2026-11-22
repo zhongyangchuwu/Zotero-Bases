@@ -22,6 +22,7 @@ export interface SyncPort {
   status(): SyncStatus;
   subscribe(fn: () => void): () => void;
   enable(): Promise<void>;
+  disable(): Promise<void>;
   syncNow(): Promise<void>;
   resolve(side: 'cloud' | 'local'): Promise<void>;
   restore(): Promise<void>;
@@ -247,7 +248,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
         await action();
       } catch (error) {
         if (!stopped) {
-          kind = 'error';
+          kind = state.enabled ? 'error' : 'off';
           conflict = undefined;
           logError?.(error);
         }
@@ -276,7 +277,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
   }
 
   function laterPush(): void {
-    if (stopped || cancelPush) return;
+    if (stopped || !state.enabled || cancelPush) return;
     cancelPush = setTimer(() => {
       cancelPush = undefined;
       const scheduled = generation;
@@ -287,7 +288,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
   }
 
   function changed(): void {
-    if (stopped || reading || applying) return;
+    if (stopped || !state.enabled || reading || applying) return;
     try {
       const before = localKey;
       if (before === local().key) return;
@@ -305,7 +306,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
   }
 
   function probe(): void {
-    if (stopped || cancelProbe || probeQueued) return;
+    if (stopped || !state.enabled || cancelProbe || probeQueued) return;
     cancelProbe = setTimer(() => {
       cancelProbe = undefined;
       probeQueued = true;
@@ -328,6 +329,17 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
     stopSettings ??= options.subscribeSettings(changed);
     stopObserving ??= transport.observe(probe);
     if (!cancelPoll) poll();
+  }
+
+  function unwatch(): void {
+    stopSettings?.();
+    stopObserving?.();
+    stopSettings = stopObserving = undefined;
+    cancelProbe?.();
+    cancelPoll?.();
+    cancelPush?.();
+    cancelProbe = cancelPoll = cancelPush = undefined;
+    generation++;
   }
 
   async function inspect(): Promise<Revision[] | undefined> {
@@ -434,7 +446,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
   }
 
   const controller: SyncPort & { stop(): void } = {
-    status: () => ({ kind, location, canRestore: !!state.rollback, busy }),
+    status: () => ({ kind, location, canRestore: state.enabled && !!state.rollback, busy }),
     subscribe(listener) {
       if (stopped) return () => {};
       listeners.add(listener);
@@ -442,9 +454,20 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
     },
     enable: () =>
       run(async () => {
-        if (!state.enabled) save({ ...state, enabled: true });
+        if (!state.enabled) {
+          save({ ...state, enabled: true });
+          kind = 'waiting';
+        }
         watch();
         await reconcile('manual');
+      }),
+    disable: () =>
+      run(async () => {
+        if (!state.enabled) return;
+        save({ ...state, enabled: false });
+        unwatch();
+        kind = 'off';
+        conflict = undefined;
       }),
     syncNow: () => run(() => reconcile('manual')),
     resolve(side) {
@@ -499,11 +522,7 @@ export function createSyncController(options: Options): SyncPort & { stop(): voi
     stop() {
       if (stopped) return;
       stopped = true;
-      stopSettings?.();
-      stopObserving?.();
-      cancelProbe?.();
-      cancelPoll?.();
-      cancelPush?.();
+      unwatch();
       listeners.clear();
     },
   };
