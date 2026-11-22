@@ -219,9 +219,9 @@ function type(field: HTMLInputElement, value: string): void {
   field.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function key(element: HTMLElement, name: string): void {
-  element.dispatchEvent(
-    new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }),
+function key(element: HTMLElement, name: string, options: KeyboardEventInit = {}): boolean {
+  return element.dispatchEvent(
+    new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true, ...options }),
   );
 }
 
@@ -267,6 +267,17 @@ async function settle(): Promise<void> {
   for (let index = 0; index < 4; index++) await Promise.resolve();
 }
 
+function focusedKey(name: string, options?: KeyboardEventInit): boolean {
+  return key(document.activeElement as HTMLElement, name, options);
+}
+
+async function scrollGrid(viewport: HTMLElement, top: number): Promise<void> {
+  viewport.scrollTop = top;
+  viewport.dispatchEvent(new Event('scroll'));
+  await new Promise<void>((done) => requestAnimationFrame(() => done()));
+  await settle();
+}
+
 describe('Zotero Bases workspace', () => {
   it('writes view controls immediately and keeps a focused filter input through settings notifications', async () => {
     const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }]);
@@ -304,7 +315,7 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).filters).toEqual([
       { column: 'title', operator: 'contains', value: 'Alpha 1' },
     ]);
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(1);
+    expect(rowIds(root)).toEqual([1]);
     field.blur();
     await settle();
 
@@ -340,7 +351,7 @@ describe('Zotero Bases workspace', () => {
     expect(cell(root, 'year', 1).textContent).toBe('2024');
   });
 
-  it('searches all pages and combines the result with saved filters and grouping', async () => {
+  it('searches unmounted rows and combines the result with saved filters and grouping', async () => {
     vi.useFakeTimers();
     try {
       const rows = Array.from({ length: 65 }, (_, index) => ({
@@ -361,31 +372,75 @@ describe('Zotero Bases workspace', () => {
       });
       const { root } = attach(host);
       await settle();
-      expect(rowIds(root)).toHaveLength(50);
+      expect(rowIds(root).length).toBeLessThan(40);
       expect(rowIds(root)).not.toContain(65);
-      click(root, 'Next page');
+      get(root, '.zb-table-wrap').focus();
+      focusedKey('G', { shiftKey: true });
       expect(rowIds(root)).toContain(65);
       expect(cell(root, 'creators', 65).textContent).not.toContain('Hidden Author');
       const search = get<HTMLInputElement>(root, '[role=searchbox]');
-      key(root, '/');
+      focusedKey('/');
       expect(document.activeElement).toBe(search);
       type(search, 'Hidden Author');
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([65]);
       expect(groupTitles(root)).toEqual(['2026 (1)']);
-      expect(get(root, '.zb-page-count').textContent).toContain('Matched 1 / 65 items');
-      expect(get<HTMLButtonElement>(root, '.zb-pagination button').disabled).toBe(true);
+      expect(get(root, '.zb-table-status').textContent).toContain('Matched 1 / 65 items');
 
       type(search, 'not present');
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([]);
-      expect(get(root, '.zb-page-count').textContent).toContain('Matched 0 / 65 items');
+      expect(get(root, '.zb-table-status').textContent).toContain('Matched 0 / 65 items');
       key(search, 'Escape');
-      expect(rowIds(root)).toHaveLength(50);
+      expect(rowIds(root)).toContain(1);
       expect(rowIds(root)).not.toContain(65);
       expect(active(host).filters).toHaveLength(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('keeps narrow-window search and its filter intact when collapsing or resizing', async () => {
+    const media = Object.assign(new EventTarget(), { matches: true });
+    vi.stubGlobal('matchMedia', () => media);
+    vi.useFakeTimers();
+    try {
+      const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }]);
+      const { root } = attach(host);
+      await settle();
+      const trigger = get<HTMLButtonElement>(root, 'button[aria-controls][aria-expanded="false"]');
+      const search = get<HTMLInputElement>(root, '[role=searchbox]');
+      const field = get(root, `#${trigger.getAttribute('aria-controls')}`);
+      const grid = get(root, '.zb-table-wrap');
+      expect(field.hidden).toBe(true);
+      trigger.click();
+      expect(document.activeElement).toBe(search);
+      type(search, 'Beta');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(rowIds(root)).toEqual([2]);
+      grid.focus();
+      expect(field.hidden).toBe(true);
+      expect(rowIds(root)).toEqual([2]);
+
+      key(grid, '/');
+      expect(field.hidden).toBe(false);
+      expect(document.activeElement).toBe(search);
+      for (const narrow of [false, true]) {
+        media.matches = narrow;
+        media.dispatchEvent(new Event('change'));
+        expect(trigger.hidden).toBe(!narrow);
+        expect(field.hidden).toBe(false);
+        expect(document.activeElement).toBe(search);
+        expect(rowIds(root)).toEqual([2]);
+      }
+      key(search, 'Escape');
+      expect(rowIds(root)).toEqual([1, 2]);
+      key(search, 'Escape');
+      expect(field.hidden).toBe(true);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -435,12 +490,12 @@ describe('Zotero Bases workspace', () => {
     });
     const { root } = attach(host);
     await settle();
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(1);
+    expect(rowIds(root)).toEqual([1]);
     expect(root.textContent).toContain('Unavailable filters are ignored (2).');
     click(root, 'Remove unavailable filters');
     expect(host.change).toHaveBeenCalledTimes(1);
     expect(active(host).filters).toEqual([{ column: 'pdf', operator: 'equals', value: 'true' }]);
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(1);
+    expect(rowIds(root)).toEqual([1]);
     expect(root.querySelector<HTMLElement>('.zb-warning')?.hidden).toBe(true);
   });
 
@@ -519,8 +574,8 @@ describe('Zotero Bases workspace', () => {
 
     click(root, 'Alpha 1');
     expect(host.openItem).toHaveBeenLastCalledWith(1, false);
-    const row = get<HTMLTableRowElement>(root, 'tr[data-item-id="1"]');
-    key(row, 'Enter');
+    cell(root, 'year').focus();
+    focusedKey('o');
     expect(host.openItem).toHaveBeenLastCalledWith(1, true);
     cell(root, 'year').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(host.openItem.mock.calls).toEqual([
@@ -598,7 +653,7 @@ describe('Zotero Bases workspace', () => {
     expect(root.textContent).toContain('Updated 1 items; skipped 1.');
   });
 
-  it('bounds the table DOM, pages through all results and saves a header sort', async () => {
+  it('bounds the mounted window, jumps across the full list, and resets the viewport on sort', async () => {
     const rows = Array.from({ length: 113 }, (_, index) => ({
       ...sample,
       id: index + 1,
@@ -607,15 +662,104 @@ describe('Zotero Bases workspace', () => {
     const { host } = fixture(rows, { ...defaultView, columns: ['title', 'year'] });
     const { root } = attach(host);
     await settle();
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(50);
-    expect(root.textContent).toContain('1–50 of 113 items');
-    click(root, 'Next page');
-    click(root, 'Next page');
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(13);
-    expect(root.textContent).toContain('101–113 of 113 items');
+    const viewport = get(root, '.zb-table-wrap');
+    expect(rowIds(root)).toContain(1);
+    expect(rowIds(root).length).toBeLessThan(40);
+    expect(get(root, '.zb-table-status').textContent).toContain('113 items');
+    viewport.focus();
+    focusedKey('G', { shiftKey: true });
+    expect(rowIds(root).at(-1)).toBe(113);
+    expect(rowIds(root)).not.toContain(1);
+    expect(document.activeElement).toBe(cell(root, 'title', 113));
+    focusedKey('g');
+    focusedKey('g');
+    expect(document.activeElement).toBe(cell(root, 'title', 1));
+    focusedKey('PageDown');
+    expect(viewport.scrollTop).toBeGreaterThan(0);
+    focusedKey('u', { ctrlKey: true });
+    expect(document.activeElement).toBe(cell(root, 'title', 1));
     get<HTMLButtonElement>(root, 'button[aria-label="Sort by · Title"]').click();
     expect(active(host).sort).toEqual({ column: 'title', direction: 'desc' });
-    expect(root.querySelector('tbody tr')?.textContent).toContain('Item 113');
+    expect(rowIds(root)[0]).toBe(113);
+  });
+
+  it('moves between cells and edits immediately without claiming the Space leader', async () => {
+    const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }], {
+      ...defaultView,
+      columns: ['title', 'property:Score', 'property:Reviewed', 'property:Status'],
+    });
+    const { root } = attach(host);
+    await settle();
+    cell(root, 'title').focus();
+    expect(focusedKey(' ')).toBe(true);
+    expect(rowSelection(root, 1).checked).toBe(false);
+    focusedKey('j');
+    expect(document.activeElement).toBe(cell(root, 'title', 2));
+    focusedKey('k');
+    focusedKey('l');
+    expect(document.activeElement).toBe(cell(root, 'property:Score'));
+    focusedKey('Enter');
+    const field = document.activeElement as HTMLInputElement;
+    type(field, '12.5');
+    focusedKey('Escape');
+    expect(host.setProperty).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(cell(root, 'property:Score'));
+    focusedKey('i');
+    type(document.activeElement as HTMLInputElement, '17.5');
+    focusedKey('Enter');
+    await settle();
+    expect(host.setProperty).toHaveBeenLastCalledWith(1, 'Score', '17.5');
+    expect(document.activeElement).toBe(cell(root, 'property:Score'));
+    focusedKey('ArrowRight');
+    focusedKey('Enter');
+    await settle();
+    expect(host.setProperty).toHaveBeenLastCalledWith(1, 'Reviewed', true);
+    focusedKey('l');
+    focusedKey('Enter');
+    expect(document.activeElement?.textContent).toBe('Reading');
+    focusedKey('ArrowDown');
+    focusedKey('Enter');
+    await settle();
+    expect(host.setProperty).toHaveBeenLastCalledWith(1, 'Status', 'Done');
+    expect(document.activeElement).toBe(cell(root, 'property:Status'));
+    focusedKey('o');
+    expect(host.openItem).toHaveBeenLastCalledWith(1, true);
+    focusedKey('h');
+    focusedKey('h');
+    focusedKey('h');
+    focusedKey('Enter');
+    expect(host.openItem).toHaveBeenLastCalledWith(1, false);
+  });
+
+  it('saves a draft exactly once on eviction and restores the active cell and selection on return', async () => {
+    const rows = Array.from({ length: 320 }, (_, index) => ({
+      ...sample,
+      id: index + 1,
+      title: `Item ${index + 1}`,
+    }));
+    const { host } = fixture(rows, { ...defaultView, columns: ['property:Memo'] });
+    const { root } = attach(host);
+    await settle();
+    const viewport = get(root, '.zb-table-wrap');
+    const original = cell(root, 'property:Memo');
+    original.focus();
+    focusedKey('x');
+    focusedKey('Enter');
+    type(document.activeElement as HTMLInputElement, 'Save before recycling');
+    await scrollGrid(viewport, 7200);
+    expect(original.isConnected).toBe(false);
+    expect(root.querySelector('.zb-editor')).toBeNull();
+    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(1, 'Memo', 'Save before recycling');
+    expect(document.activeElement).toBe(viewport);
+    await scrollGrid(viewport, 0);
+    const remounted = cell(root, 'property:Memo');
+    expect(remounted).not.toBe(original);
+    expect(document.activeElement).toBe(remounted);
+    expect(remounted.hasAttribute('data-active-cell')).toBe(true);
+    expect(remounted.textContent).toBe('Save before recycling');
+    expect(rowSelection(root, 1).checked).toBe(true);
+    focusedKey('x');
+    expect(rowSelection(root, 1).checked).toBe(false);
   });
 
   it('accepts the reserved key hint without submitting or discarding property options', async () => {
@@ -723,7 +867,7 @@ describe('Zotero Bases workspace', () => {
     expect(warning.hidden).toBe(true);
   });
 
-  it('paginates groups without duplicate items and lets a folded group expand from its header', async () => {
+  it('folds and expands a group with the keyboard while retaining the group cursor', async () => {
     const rows = Array.from({ length: 115 }, (_, index) => ({
       ...sample,
       id: index + 1,
@@ -737,35 +881,31 @@ describe('Zotero Bases workspace', () => {
     });
     const { root } = attach(host);
     await settle();
-    expect(rowIds(root)).toHaveLength(50);
-    expect(root.textContent).toContain('1–50 of 115 items');
-    click(root, 'Next page');
-    expect(groupTitles(root)).toEqual(['2023 (62)', '2024 (51)']);
+    expect(groupTitles(root)).toEqual(['2023 (62)']);
+    get(root, '.zb-table-wrap').focus();
+    focusedKey('g');
+    focusedKey('g');
+    focusedKey('h');
     const firstGroup = '[aria-label="2023 (62)"]';
-    get<HTMLButtonElement>(root, firstGroup).click();
     expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('false');
-    expect(rowIds(root)).toEqual(rows.slice(62, 111).map(({ id }) => id));
-    expect(root.textContent).toContain('1–50 of 54 visible rows or groups · 115 items');
-    click(root, 'Next page');
-    expect(rowIds(root)).toEqual([112, 113, 114, 115]);
-    expect(root.textContent).toContain('51–54 of 54 visible rows or groups');
-    click(root, 'Previous page');
-    get<HTMLButtonElement>(root, firstGroup).click();
-    const visited = rowIds(root);
-    click(root, 'Next page');
-    visited.push(...rowIds(root));
-    click(root, 'Next page');
-    visited.push(...rowIds(root));
-    expect(visited).toEqual(rows.map(({ id }) => id));
-    expect(groupTitles(root)).toEqual(['2024 (51)', 'No value (2)']);
+    expect(rowIds(root)[0]).toBe(63);
+    expect(root.textContent).toContain('115 items');
+    focusedKey('l');
+    expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('true');
+    expect(rowIds(root)[0]).toBe(1);
+    focusedKey('Enter');
+    expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('false');
+    focusedKey('G', { shiftKey: true });
+    expect(rowIds(root).at(-1)).toBe(115);
+    expect(groupTitles(root)).toContain('No value (2)');
   });
 
-  it('extends a checkbox range across pages in group order and selects all through folds', async () => {
-    const rows = Array.from({ length: 63 }, (_, index) => ({
+  it('extends keyboard and Shift-click ranges across unmounted grouped rows', async () => {
+    const rows = Array.from({ length: 320 }, (_, index) => ({
       ...sample,
       id: index + 1,
-      title: `Item ${63 - index}`,
-      year: index < 56 ? '2023' : index < 59 ? '2024' : '2025',
+      title: `Item ${index + 1}`,
+      year: index < 150 ? '2023' : '2024',
     }));
     const { host } = fixture(rows, {
       ...defaultView,
@@ -774,23 +914,30 @@ describe('Zotero Bases workspace', () => {
     });
     const { root } = attach(host);
     await settle();
-    rowSelection(root, 8).click();
-    expect(selectAllInput(root).indeterminate).toBe(true);
-    click(root, 'Next page');
-    get<HTMLButtonElement>(root, '[aria-label="2024 (3)"]').click();
-    const endpoint = rowSelection(root, 63);
-    endpoint.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
-    endpoint.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-    key(endpoint, 'Enter');
+    const first = cell(root, 'title', 5);
+    first.focus();
+    focusedKey('x');
+    for (let i = 0; i < 235; i++) focusedKey('J', { shiftKey: true });
+    expect(document.activeElement).toBe(cell(root, 'title', 240));
+    expect(get(root, '.zb-table-status').textContent).toContain('236 selected');
+    expect(rowIds(root)).not.toContain(5);
+    focusedKey('K', { shiftKey: true });
+    expect(document.activeElement).toBe(cell(root, 'title', 239));
+    const title = get<HTMLButtonElement>(cell(root, 'title', 235), 'button');
+    title.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }),
+    );
     expect(host.openItem).not.toHaveBeenCalled();
-    expect(root.textContent).toContain('9 selected');
-    expect(rowIds(root).filter((id) => rowSelection(root, id).checked)).toEqual([
-      6, 5, 4, 3, 2, 1, 63,
-    ]);
+    expect(document.activeElement).toBe(cell(root, 'title', 235));
+    focusedKey('G', { shiftKey: true });
+    rowSelection(root, 320).dispatchEvent(
+      new MouseEvent('click', { bubbles: true, shiftKey: true }),
+    );
+    expect(get(root, '.zb-table-status').textContent).toContain('316 selected');
     expect(selectAllInput(root).indeterminate).toBe(true);
 
     selectAllInput(root).click();
-    expect(root.textContent).toContain('63 selected');
+    expect(root.textContent).toContain('320 selected');
     expect(selectAllInput(root).checked).toBe(true);
     expect(selectAllInput(root).indeterminate).toBe(false);
     const bulk = get(root, '[aria-label="Bulk edit"]');
@@ -801,7 +948,7 @@ describe('Zotero Bases workspace', () => {
     expect(change).toEqual({ kind: 'tag', tag: 'existing', add: true });
     expect(host.bulk).toHaveBeenCalledTimes(1);
     await settle();
-    expect(root.textContent).toContain('63 selected');
+    expect(root.textContent).toContain('320 selected');
     click(bulk, 'Clear selection');
     expect(selectAllInput(root).checked).toBe(false);
     expect(bulk.hidden).toBe(true);
