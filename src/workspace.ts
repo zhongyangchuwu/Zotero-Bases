@@ -25,8 +25,11 @@ import { cellValue, filterOperators, queryCatalog, type QueryResult } from './qu
 import type { SyncPort } from './sync';
 import { mountSyncControls } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
+import { TableKeys, type TableCommand } from './table-keys';
+import { flattenRows, VirtualLayout, type VirtualRow } from './virtual-layout';
 
-const PAGE_SIZE = 50;
+const OVERSCAN = 170;
+const FALLBACK_VIEWPORT_HEIGHT = 680;
 const SEARCH_DELAY = 140;
 const SELECT_COLUMN_WIDTH = 36;
 const COLUMN_ACTION_WIDTH = 40;
@@ -151,7 +154,7 @@ const words = {
   edit: ['Edit', '编辑'],
   readOnly: ['Read-only', '只读'],
   locate: ['Locate in Zotero', '在 Zotero 中定位'],
-  openRow: ['Enter: open PDF or locate in Zotero', '回车：打开 PDF 或在 Zotero 中定位'],
+  openRow: ['Double-click to open PDF or locate in Zotero', '双击打开 PDF 或在 Zotero 中定位'],
   untitled: ['Untitled', '无标题'],
   tagName: ['New or existing tag', '新建或现有标签'],
   addTag: ['Add tag', '添加标签'],
@@ -169,8 +172,10 @@ const words = {
   bulkTag: ['Bulk tag', '批量编辑的标签'],
   noItems: ['No matching items', '没有匹配条目'],
   noColumns: ['No visible columns. Choose columns above.', '没有可见列，请在上方选择要显示的列。'],
-  previous: ['Previous page', '上一页'],
-  next: ['Next page', '下一页'],
+  keyboardHint: [
+    'hjkl / arrows Move · Enter Edit / open · x Select · o Open PDF · / Search',
+    'hjkl／方向键 移动 · Enter 编辑／打开 · x 勾选 · o 打开 PDF · / 搜索',
+  ],
   loadError: ['Items could not be loaded.', '无法加载条目。'],
   retry: ['Retry', '重试'],
   actionError: ['Could not save this change.', '无法保存此项更改。'],
@@ -179,6 +184,7 @@ const words = {
     '无法保存。请检查属性键或选项名是否有效，以及是否已被使用。',
   ],
   openError: ['Could not open this item.', '无法打开该条目。'],
+  noPDF: ['No PDF attachment.', '没有 PDF 附件。'],
 } as const;
 
 let nextId = 0;
@@ -219,7 +225,23 @@ export function mountWorkspace(
   const selected = new Set<number>();
   let selectionAnchor: number | undefined;
   let bulkPending = false;
-  let page = 0;
+  const layout = new VirtualLayout();
+  const tableKeys = new TableKeys();
+  let entries: readonly VirtualRow[] = [];
+  let tableBody:
+    | {
+        body: HTMLTableSectionElement;
+        leading: HTMLTableRowElement;
+        trailing: HTMLTableRowElement;
+        columns: readonly Column[];
+      }
+    | undefined;
+  const mounted = new Map<string, HTMLTableRowElement>();
+  let activeCell: { key: string; column: Column } | undefined;
+  let paintedCell: HTMLTableCellElement | undefined;
+  let restoreGridFocus = false;
+  let virtualFrame: number | undefined;
+  let resetMeasurements = false;
   let searchTerm = '';
   let searchTimer: number | undefined;
   let composingSearch = false;
@@ -227,6 +249,9 @@ export function mountWorkspace(
   let renameViewId: string | undefined;
   let deleteChoice: { key: string; option?: string } | undefined;
   let closeEditor: ((restore: boolean) => void) | undefined;
+  let recycleEditor: (() => void) | undefined;
+  let editorKey: ((event: KeyboardEvent) => boolean) | undefined;
+  const keyTarget: EventTarget = window ?? root;
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
     text: t,
@@ -471,14 +496,15 @@ export function mountWorkspace(
   bulkActions.append(bulkPropertyForm, buildBulkTagForm());
   bulkBar.append(selectionCount, button(t('clearSelection'), clearSelection), bulkActions);
   const tableWrap = element('div', 'zb-table-wrap');
-  const pagination = element('div', 'zb-pagination');
+  tableWrap.tabIndex = 0;
+  tableWrap.setAttribute('aria-label', t('table'));
+  const tableStatus = element('div', 'zb-table-status');
   const tagValues = element('datalist');
   tagValues.id = `${mountId}-filter-tags`;
-  const count = element('span', 'zb-page-count');
-  const previous = button(t('previous'), () => setPage(page - 1));
-  const next = button(t('next'), () => setPage(page + 1));
-  pagination.append(count, previous, next);
-  panel.append(toolbar, warning, bulkBar, status, tableWrap, pagination);
+  const count = element('span');
+  count.setAttribute('aria-live', 'polite');
+  tableStatus.append(count, element('span', 'zb-table-keys', t('keyboardHint')));
+  panel.append(toolbar, warning, bulkBar, status, tableWrap, tableStatus);
   surface.append(top, panel, tagValues);
   root.append(style, surface);
   syncDensity();
@@ -491,7 +517,19 @@ export function mountWorkspace(
     queueSearch();
   });
   search.addEventListener('input', queueSearch);
-  root.addEventListener('keydown', workspaceKeys);
+  // Run before Zotero and other add-ons' document handlers, but only consume our keys.
+  keyTarget.addEventListener('keydown', captureKeys as EventListener, true);
+  tableWrap.addEventListener('scroll', scheduleWindow);
+  tableWrap.addEventListener('focusin', gridFocus);
+  tableWrap.addEventListener('focusout', (event) => {
+    if (event.relatedTarget && !tableWrap.contains(event.relatedTarget as Node)) {
+      tableKeys.reset();
+      restoreGridFocus = false;
+    }
+  });
+  tableWrap.addEventListener('click', gridClick, true);
+  const resizeObserver = window?.ResizeObserver && new window.ResizeObserver(scheduleWindow);
+  resizeObserver?.observe(tableWrap);
   surface.addEventListener('pointerdown', (event) => {
     if (viewActions.open && !viewActions.contains(event.target as Node)) viewActions.open = false;
   });
@@ -508,9 +546,7 @@ export function mountWorkspace(
     const term = search.value.trim();
     if (term === searchTerm) return;
     searchTerm = term;
-    page = 0;
-    evaluate();
-    tableWrap.scrollTop = 0;
+    evaluate(true);
   }
 
   function clearSearch(): void {
@@ -518,6 +554,42 @@ export function mountWorkspace(
     search.value = '';
     clearSearchButton.hidden = true;
     applySearch();
+  }
+
+  function captureKeys(event: KeyboardEvent): void {
+    const target = event.target as Element | null;
+    if (
+      event.defaultPrevented ||
+      !target?.closest ||
+      (!surface.contains(target) && target !== root)
+    )
+      return;
+    if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === ' ' && target.closest('button, input, select, textarea, summary')) {
+        event.stopPropagation();
+        return;
+      }
+      if (target.closest('.zb-editor')) {
+        if (event.key === 'Escape') {
+          closeEditor?.(true);
+        } else if (event.key === 'Enter' && target.localName === 'button') {
+          (target as HTMLButtonElement).click();
+        } else if (!editorKey?.(event)) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (tabs.contains(target) && moveViewTab(target, event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    }
+    gridKeys(event, target);
+    workspaceKeys(event);
+    if (event.defaultPrevented) event.stopPropagation();
   }
 
   function workspaceKeys(event: KeyboardEvent): void {
@@ -549,14 +621,21 @@ export function mountWorkspace(
     } else if (event.key === 'Escape' && search.value) {
       event.preventDefault();
       clearSearch();
+    } else if (event.key === 'Escape' && target === search && selected.size) {
+      event.preventDefault();
+      clearSelection();
     }
   }
 
   function syncDensity(): void {
+    const index = layout.indexAt(tableWrap.scrollTop);
+    const distance = index < 0 ? 0 : tableWrap.scrollTop - layout.offset(index);
     const current = activeView().density ?? 'compact';
     density.value = current;
     surface.dataset.density = current;
     fitPills();
+    layout.setDensity(current);
+    if (tableBody) renderWindow(index < 0 ? 0 : layout.offset(index) + distance);
   }
 
   function fitPills(): void {
@@ -651,10 +730,13 @@ export function mountWorkspace(
       updatePropertyHint();
     }
     if (changedColumns || changedSort || changedProperties || changedActive) renderColumns();
+    if (changedColumns || changedProperties) resetMeasurements = true;
     if (changedProperties || changedActive || (changedFilters && !keepFilterInput)) renderFilters();
     if (changedProperties || changedActive || changedScope || changedGrouping) renderGrouping();
-    if (changedActive || changedScope || changedSort || changedFilters || changedGrouping) page = 0;
-    if (changedActive || changedScope || changedColumns) closeEditor?.(false);
+    const reset = changedActive || changedScope || changedSort || changedFilters || changedGrouping;
+    if (changedActive || changedScope || changedColumns) recycleEditor?.();
+    if (changedActive || changedScope) activeCell = undefined;
+    if (reset) tableWrap.scrollTop = 0;
     if (changedScope) {
       refresh();
     } else if (
@@ -665,7 +747,7 @@ export function mountWorkspace(
       changedFilters ||
       changedGrouping
     ) {
-      evaluate();
+      evaluate(reset);
     }
   }
 
@@ -773,6 +855,22 @@ export function mountWorkspace(
     field.select();
   }
 
+  function moveViewTab(tab: Element, key: string): boolean {
+    if (!tab.matches('[role=tab]')) return false;
+    const views = preferences.views;
+    const index = views.findIndex(({ id }) => id === (tab as HTMLElement).dataset.focus);
+    if (index < 0) return false;
+    let target: number;
+    if (key === 'ArrowRight') target = (index + 1) % views.length;
+    else if (key === 'ArrowLeft') target = (index + views.length - 1) % views.length;
+    else if (key === 'Home') target = 0;
+    else if (key === 'End') target = views.length - 1;
+    else return false;
+    selectView(views[target]!.id);
+    (tabs.children[target] as HTMLElement).focus();
+    return true;
+  }
+
   function renderTabs(): void {
     const views = preferences.views;
     preserveFocus(tabs, () => {
@@ -787,17 +885,6 @@ export function mountWorkspace(
           tab.tabIndex = selected ? 0 : -1;
           focusKey(tab, view.id);
           if (selected) panel.setAttribute('aria-labelledby', tab.id);
-          tab.addEventListener('keydown', (event) => {
-            let target: number;
-            if (event.key === 'ArrowRight') target = (index + 1) % views.length;
-            else if (event.key === 'ArrowLeft') target = (index + views.length - 1) % views.length;
-            else if (event.key === 'Home') target = 0;
-            else if (event.key === 'End') target = views.length - 1;
-            else return;
-            event.preventDefault();
-            selectView(views[target]!.id);
-            (tabs.children[target] as HTMLElement).focus();
-          });
           return tab;
         }),
       );
@@ -1513,6 +1600,18 @@ export function mountWorkspace(
     const total = result?.rows.length ?? 0;
     bulkBar.hidden = !selected.size;
     selectionCount.textContent = zh ? `已选择 ${selected.size} 条` : `${selected.size} selected`;
+    const parts = [
+      searchTerm || activeView().filters.length
+        ? zh
+          ? `匹配 ${total}／${catalog?.rows.length ?? 0} 条`
+          : `Matched ${total} / ${catalog?.rows.length ?? 0} items`
+        : zh
+          ? `共 ${total} 条`
+          : `${total} items`,
+    ];
+    if (selected.size) parts.push(selectionCount.textContent);
+    const summary = parts.join(' · ');
+    if (count.textContent !== summary) count.textContent = summary;
     const header = tableWrap.querySelector<HTMLInputElement>('[data-select-all]');
     if (header) {
       header.disabled = !total;
@@ -1521,7 +1620,9 @@ export function mountWorkspace(
     }
     for (const check of tableWrap.querySelectorAll<HTMLInputElement>('[data-select-item]')) {
       check.checked = selected.has(Number(check.dataset.selectItem));
-      check.closest('tr')?.setAttribute('data-selected', String(check.checked));
+      const row = check.closest('tr');
+      row?.setAttribute('data-selected', String(check.checked));
+      row?.setAttribute('aria-selected', String(check.checked));
     }
   }
 
@@ -1544,32 +1645,21 @@ export function mountWorkspace(
     if (!anchored) selectionAnchor = undefined;
   }
 
-  function* displayedRows(): Iterable<Row> {
-    if (groups) {
-      for (const group of groups) {
-        if (!foldedGroups.has(group.value)) yield* group.rows;
-      }
-    } else if (result) {
-      yield* result.rows;
-    }
-  }
-
   function selectItem(id: number, checked: boolean, extend: boolean): void {
     const toggle = (id: number): void => {
       if (checked) selected.add(id);
       else selected.delete(id);
     };
-    if (extend && selectionAnchor !== undefined && selectionAnchor !== id) {
-      const range: number[] = [];
-      for (const row of displayedRows()) {
-        const endpoint = row.id === selectionAnchor || row.id === id;
-        if (range.length && endpoint) {
-          range.push(row.id);
-          for (const target of range) toggle(target);
-          syncSelection();
-          return;
+    if (extend && selectionAnchor !== undefined) {
+      const from = layout.indexOf(`item:${selectionAnchor}`);
+      const to = layout.indexOf(`item:${id}`);
+      if (from >= 0 && to >= 0) {
+        for (let index = Math.min(from, to), end = Math.max(from, to); index <= end; index++) {
+          const entry = entries[index];
+          if (entry?.kind === 'item') toggle(entry.row.id);
         }
-        if (range.length || endpoint) range.push(row.id);
+        syncSelection();
+        return;
       }
     }
     toggle(id);
@@ -1603,7 +1693,7 @@ export function mountWorkspace(
     );
   }
 
-  function evaluate(): void {
+  function evaluate(resetScroll = false): void {
     const view = activeView();
     result = catalog
       ? queryCatalog(catalog, view, preferences.properties, options.language, searchTerm)
@@ -1620,57 +1710,38 @@ export function mountWorkspace(
     groupWarning.hidden = !invalidGroup;
     groupWarningText.textContent = invalidGroup ? t('invalidGrouping') : '';
     if (result) retainSelection(result.rows);
-    if (!closeEditor) renderTable();
+    if (!closeEditor) renderTable(resetScroll);
     else syncSelection();
   }
 
-  function setPage(index: number): void {
-    closeEditor?.(false);
-    const moved = page !== index;
-    page = index;
-    renderTable();
-    if (moved) tableWrap.scrollTop = 0;
-  }
-
-  function renderTable(): void {
+  function renderTable(resetScroll = false): void {
     if (disposed) return;
     const view = activeView();
     const items = result?.rows;
-    const total = items?.length ?? 0;
-    let folded = 0;
-    let entries = total;
-    // A folded group occupies one slot so even an entirely folded page has a visible toggle.
-    if (groups && foldedGroups.size) {
-      for (const group of groups) {
-        if (foldedGroups.has(group.value)) {
-          folded++;
-          entries -= group.rows.length - 1;
-        }
-      }
-    }
-    page = Math.max(0, Math.min(page, Math.ceil(entries / PAGE_SIZE) - 1));
-    const offset = page * PAGE_SIZE;
-    const end = Math.min(entries, offset + PAGE_SIZE);
+    const oldTop = layout.indexAt(tableWrap.scrollTop);
+    const distance = oldTop < 0 ? 0 : tableWrap.scrollTop - layout.offset(oldTop);
+    const oldKey = entries[oldTop]?.key;
+    const oldActive = activeCell && layout.indexOf(activeCell.key);
+    entries = flattenRows(items ?? [], groups, foldedGroups);
+    layout.replace(entries);
+    const top = oldKey ? layout.indexOf(oldKey) : -1;
     const columns = view.columns.filter(
       (column) => !column.startsWith('property:') || propertyFor(column),
     );
-    pagination.hidden = !items || !columns.length || (!total && !searchTerm);
-    previous.disabled = page === 0;
-    next.disabled = end >= entries;
-    const pageCount = folded
-      ? zh
-        ? `第 ${offset + 1}–${end} 个可见条目或分组／共 ${entries} 个（${total} 条资料）`
-        : `${offset + 1}–${end} of ${entries} visible rows or groups · ${total} items`
-      : zh
-        ? `第 ${offset + 1}–${end} 条／共 ${total} 条`
-        : `${offset + 1}–${end} of ${total} items`;
-    count.textContent = searchTerm
-      ? `${total ? `${pageCount} · ` : ''}${
-          zh
-            ? `匹配 ${total}／共 ${catalog?.rows.length ?? 0} 条`
-            : `Matched ${total} / ${catalog?.rows.length ?? 0} items`
-        }`
-      : pageCount;
+    const currentColumn =
+      activeCell && columns.includes(activeCell.column) ? activeCell.column : columns[0];
+    const currentEntry =
+      (!resetScroll && activeCell ? entries[layout.indexOf(activeCell.key)] : undefined) ??
+      entries[resetScroll ? 0 : Math.min(Math.max(oldActive ?? 0, 0), entries.length - 1)];
+    activeCell = currentColumn && currentEntry && { key: currentEntry.key, column: currentColumn };
+    const focus = doc.activeElement;
+    if (focus === tableWrap || (focus && tableBody?.body.contains(focus))) {
+      tableWrap.focus({ preventScroll: true });
+      restoreGridFocus = true;
+    }
+    mounted.clear();
+    tableBody = undefined;
+    paintedCell = undefined;
 
     preserveFocus(tableWrap, () => {
       if (!items || !columns.length) {
@@ -1682,6 +1753,9 @@ export function mountWorkspace(
       }
       const table = element('table');
       table.setAttribute('aria-label', t('table'));
+      table.setAttribute('role', 'grid');
+      table.setAttribute('aria-multiselectable', 'true');
+      table.setAttribute('aria-rowcount', String(entries.length + 1));
       const colgroup = element('colgroup');
       const selectionColumn = element('col');
       selectionColumn.style.width = `${SELECT_COLUMN_WIDTH}px`;
@@ -1743,38 +1817,353 @@ export function mountWorkspace(
       titles.append(actionCell);
       header.append(titles);
       const body = element('tbody');
-      if (groups) {
-        const tag = view.group?.column === 'tags' ? view.group.tag : undefined;
-        let start = 0;
-        for (const group of groups) {
-          const folded = foldedGroups.has(group.value);
-          const groupEnd = start + (folded ? 1 : group.rows.length);
-          if (groupEnd > offset) {
-            body.append(renderGroupHeader(group, folded, start, columns.length + 2, tag));
-            if (!folded) {
-              const limit = Math.min(group.rows.length, end - start);
-              for (let index = Math.max(0, offset - start); index < limit; index++)
-                body.append(renderRow(group.rows[index]!, columns));
-            }
-          }
-          start = groupEnd;
-          if (start >= end) break;
-        }
-      } else {
-        for (let index = offset; index < end; index++)
-          body.append(renderRow(items[index]!, columns));
-      }
+      const spacer = () => {
+        const line = element('tr', 'zb-virtual-spacer');
+        line.setAttribute('aria-hidden', 'true');
+        const cell = element('td');
+        cell.colSpan = columns.length + 2;
+        line.append(cell);
+        return line;
+      };
+      const leading = spacer();
+      const trailing = spacer();
+      body.append(leading, trailing);
+      tableBody = { body, leading, trailing, columns };
       table.append(colgroup, header, body);
       updateTableWidths(table);
       tableWrap.replaceChildren(table);
-      if (!total) {
+      if (!items.length) {
         const empty = element('div', 'zb-empty', t('noItems'));
         empty.setAttribute('role', 'status');
         tableWrap.append(empty);
       }
     });
+    renderWindow(resetScroll ? 0 : top < 0 ? tableWrap.scrollTop : layout.offset(top) + distance);
     syncSelection();
+  }
+
+  function viewportHeight(): number {
+    const headerHeight =
+      tableBody?.body.previousElementSibling?.getBoundingClientRect().height ?? 0;
+    return Math.max(1, (tableWrap.clientHeight || FALLBACK_VIEWPORT_HEIGHT) - headerHeight);
+  }
+
+  function scheduleWindow(): void {
+    if (disposed || !tableBody || virtualFrame !== undefined) return;
+    if (!window) {
+      renderWindow();
+      return;
+    }
+    virtualFrame = window.requestAnimationFrame(() => {
+      virtualFrame = undefined;
+      renderWindow();
+    });
+  }
+
+  function setGap(row: HTMLTableRowElement, height: number): void {
+    row.hidden = height <= 0;
+    row.cells[0]!.style.height = `${Math.max(0, height)}px`;
+  }
+
+  function renderWindow(wantedTop?: number): void {
+    if (disposed || !tableBody) return;
+    const { body, leading, trailing, columns } = tableBody;
+    const height = viewportHeight();
+    const initial = Math.min(
+      wantedTop ?? tableWrap.scrollTop,
+      Math.max(0, layout.totalHeight - height),
+    );
+    const anchor = layout.indexAt(initial);
+    const within = anchor < 0 ? 0 : initial - layout.offset(anchor);
+    const atEnd = initial > 0 && initial + height >= layout.totalHeight - 2;
+    const baseChanged = resetMeasurements;
+    resetMeasurements = false;
+    if (baseChanged) layout.clearMeasurements();
+    const topForAnchor = () => {
+      const max = Math.max(0, layout.totalHeight - height);
+      if (atEnd) return max;
+      if (anchor < 0) return 0;
+      const local = Math.min(
+        within,
+        Math.max(0, layout.offset(anchor + 1) - layout.offset(anchor) - 1),
+      );
+      return Math.min(max, layout.offset(anchor) + local);
+    };
+    const top = baseChanged ? topForAnchor() : initial;
+    const range = layout.window(top, height, OVERSCAN);
+    for (const [key, row] of mounted) {
+      const i = layout.indexOf(key);
+      if (i >= range.start && i < range.end) continue;
+      const ownedFocus = doc.activeElement && row.contains(doc.activeElement);
+      if (row.querySelector('.zb-editor')) recycleEditor?.();
+      if (ownedFocus) {
+        tableWrap.focus({ preventScroll: true });
+        restoreGridFocus = true;
+      }
+      row.remove();
+      mounted.delete(key);
+    }
+    const tag = activeView().group;
+    let next: HTMLTableRowElement = trailing;
+    let added = false;
+    for (let i = range.end - 1; i >= range.start; i--) {
+      const entry = entries[i]!;
+      let row = mounted.get(entry.key);
+      if (!row) {
+        row =
+          entry.kind === 'group'
+            ? renderGroupHeader(
+                entry,
+                columns.length + 2,
+                tag?.column === 'tags' ? tag.tag : undefined,
+              )
+            : renderRow(entry.row, columns);
+        row.dataset.rowKey = entry.key;
+        row.setAttribute('aria-rowindex', String(i + 2));
+        mounted.set(entry.key, row);
+        added = true;
+      }
+      if (row.nextSibling !== next) body.insertBefore(row, next);
+      next = row;
+    }
+    setGap(leading, range.top);
+    setGap(trailing, range.bottom);
+    let measured = false;
+    if (tableWrap.clientHeight && range.start < range.end) {
+      if (activeView().density === 'wrap') {
+        for (let i = range.start; i < range.end; i++) {
+          const row = mounted.get(entries[i]!.key)!;
+          measured = layout.measure(i, row.getBoundingClientRect().height) || measured;
+        }
+      } else {
+        measured = layout.setFixedHeight(next.getBoundingClientRect().height);
+      }
+    }
+    let scroll = top;
+    if (measured) {
+      setGap(leading, layout.offset(range.start));
+      setGap(trailing, layout.totalHeight - layout.offset(range.end));
+      scroll = topForAnchor();
+      const corrected = layout.window(scroll, height, OVERSCAN);
+      if (corrected.start !== range.start || corrected.end !== range.end) scheduleWindow();
+    }
+    // Do not interrupt a native smooth scroll just to write back the same offset.
+    if (
+      (wantedTop !== undefined || baseChanged || measured) &&
+      Math.abs(tableWrap.scrollTop - scroll) > 0.5
+    )
+      tableWrap.scrollTop = scroll;
+    paintActiveCell();
+    if (added) fitPills();
+  }
+
+  function activeNode(): HTMLTableCellElement | undefined {
+    if (!activeCell || !tableBody) return;
+    const row = mounted.get(activeCell.key);
+    if (!row) return;
+    if (row.classList.contains('zb-group')) return row.cells[0];
+    const column = tableBody.columns.indexOf(activeCell.column);
+    return column < 0 ? undefined : row.cells[column + 1];
+  }
+
+  function paintActiveCell(): void {
+    const cell = activeNode();
+    if (cell !== paintedCell) {
+      if (paintedCell) delete paintedCell.dataset.activeCell;
+      if (cell) cell.dataset.activeCell = '';
+      paintedCell = cell;
+    }
+    if (cell && restoreGridFocus && doc.activeElement === tableWrap) {
+      const index = activeCell ? layout.indexOf(activeCell.key) : -1;
+      const top = tableWrap.scrollTop;
+      if (
+        index < 0 ||
+        layout.offset(index) >= top + viewportHeight() ||
+        layout.offset(index + 1) <= top
+      )
+        return;
+      restoreGridFocus = false;
+      cell.focus({ preventScroll: true });
+      const bounds = cell.getBoundingClientRect();
+      const viewport = tableWrap.getBoundingClientRect();
+      if (!cell.parentElement?.classList.contains('zb-group')) {
+        if (bounds.left < viewport.left) tableWrap.scrollLeft += bounds.left - viewport.left;
+        else if (bounds.right > viewport.right)
+          tableWrap.scrollLeft += bounds.right - viewport.right;
+      }
+    }
+  }
+
+  function gridTarget(target: Element): void {
+    const row = target.closest<HTMLTableRowElement>('tbody tr[data-row-key]');
+    const key = row?.dataset.rowKey;
+    const fallback = activeCell?.column ?? tableBody?.columns[0];
+    if (!key || !fallback) return;
+    const cell = target.closest<HTMLElement>('td');
+    activeCell = { key, column: (cell?.dataset.column as Column | undefined) ?? fallback };
+    paintActiveCell();
+  }
+
+  function gridFocus(event: FocusEvent): void {
+    if (event.target === tableWrap) return;
+    restoreGridFocus = false;
+    gridTarget(event.target as Element);
+  }
+
+  function gridClick(event: MouseEvent): void {
+    const target = event.target as Element;
+    if (!tableWrap.contains(target)) return;
+    const cell = target.closest<HTMLTableCellElement>('td[data-column]');
+    if (event.shiftKey && cell && !target.closest('.zb-editor')) {
+      selectItem(Number(cell.parentElement?.dataset.itemId), true, true);
+      cell.focus({ preventScroll: true });
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    gridTarget(target);
+    if (cell && !target.closest('button, input, select, textarea, .zb-editor'))
+      cell.focus({ preventScroll: true });
+  }
+
+  function moveGrid(index: number, column: Column, allowSmooth: boolean): void {
+    const entry = entries[index];
+    if (!entry) return;
+    activeCell = { key: entry.key, column };
+    tableWrap.focus({ preventScroll: true });
+    restoreGridFocus = true;
+    const start = layout.offset(index);
+    const end = layout.offset(index + 1);
+    const visibleTop = tableWrap.scrollTop;
+    const height = viewportHeight();
+    const top =
+      start < visibleTop || end - start > height
+        ? start
+        : end > visibleTop + height
+          ? end - height
+          : visibleTop;
+    // Nearby steps scroll smoothly; far jumps make the destination available immediately.
+    if (
+      allowSmooth &&
+      tableWrap.clientHeight &&
+      Math.abs(top - visibleTop) > 0.5 &&
+      Math.abs(top - visibleTop) < height / 2 &&
+      window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches !== true
+    ) {
+      tableWrap.scrollTo({ top, behavior: 'smooth' });
+      paintActiveCell();
+      scheduleWindow();
+    } else {
+      renderWindow(top);
+    }
+  }
+
+  function gridKeys(event: KeyboardEvent, target: Element): void {
+    if (
+      event.defaultPrevented ||
+      (target !== tableWrap && !target.closest('tbody tr[data-row-key]')) ||
+      target.closest('.zb-editor')
+    )
+      return;
+    if (event.key === 'Enter' && target.matches('input[type=checkbox]')) return;
+    const command = tableKeys.handle(event);
+    if (!command) return;
+    if (!runGridCommand(command)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function runGridCommand(command: TableCommand): boolean {
+    if (command === 'prefix') return true;
+    if (command === 'escape') {
+      if (search.value) clearSearch();
+      else if (selected.size) clearSelection();
+      else return false;
+      return true;
+    }
+    const current = activeCell;
+    if (!current || !tableBody) return false;
+    const index = layout.indexOf(current.key);
+    const entry = entries[index];
+    if (!entry) return false;
+    const columns = tableBody.columns;
+    const columnIndex = columns.indexOf(current.column);
+    let destination = index;
+    let column = current.column;
+    switch (command) {
+      case 'left':
+      case 'right':
+        if (entry.kind === 'group') {
+          setGroupFolded(entry, command === 'left');
+          return true;
+        }
+        column = columns[columnIndex + (command === 'left' ? -1 : 1)] ?? column;
+        break;
+      case 'up':
+      case 'down':
+        destination += command === 'up' ? -1 : 1;
+        break;
+      case 'first':
+        destination = 0;
+        break;
+      case 'last':
+        destination = entries.length - 1;
+        break;
+      case 'pageUp':
+      case 'pageDown':
+        destination = layout.indexAt(
+          layout.offset(index) + (command === 'pageUp' ? -1 : 1) * viewportHeight(),
+        );
+        if (destination === index) destination += command === 'pageUp' ? -1 : 1;
+        break;
+      case 'extendUp':
+      case 'extendDown': {
+        const step = command === 'extendUp' ? -1 : 1;
+        destination += step;
+        while (entries[destination]?.kind === 'group') destination += step;
+        const to = entries[destination];
+        if (to?.kind !== 'item') return true;
+        if (selectionAnchor === undefined && entry.kind === 'item') selectionAnchor = entry.row.id;
+        selectItem(to.row.id, true, true);
+        break;
+      }
+      case 'toggle':
+        if (entry.kind === 'item') selectItem(entry.row.id, !selected.has(entry.row.id), false);
+        return true;
+      case 'open':
+        if (entry.kind === 'item') {
+          if (entry.row.pdf) openRow(entry.row, true);
+          else showStatus(t('noPDF'));
+        }
+        return true;
+      case 'activate':
+      case 'edit':
+        if (entry.kind === 'group') {
+          setGroupFolded(entry, !entry.folded);
+        } else {
+          if (!activeNode()) moveGrid(index, column, false);
+          activeNode()?.querySelector<HTMLElement>('button, input[type=checkbox]')?.click();
+        }
+        return true;
+    }
+    destination = Math.max(0, Math.min(entries.length - 1, destination));
+    moveGrid(destination, column, true);
+    return true;
+  }
+
+  function setGroupFolded(entry: Extract<VirtualRow, { kind: 'group' }>, folded: boolean): void {
+    if (entry.folded === folded) return;
+    if (folded) foldedGroups.add(entry.group.value);
+    else foldedGroups.delete(entry.group.value);
+    const column = activeCell?.column ?? tableBody?.columns[0];
+    if (column) activeCell = { key: entry.key, column };
+    renderTable();
+  }
+
+  function widthGeometryChanged(): void {
+    resetMeasurements = activeView().density === 'wrap';
     fitPills();
+    scheduleWindow();
   }
 
   function updateTableWidths(table = tableWrap.querySelector('table')): void {
@@ -1791,7 +2180,7 @@ export function mountWorkspace(
       total += width;
     }
     table.style.width = `${total}px`;
-    fitPills();
+    if (table.isConnected) widthGeometryChanged();
   }
 
   function resizeGrip(
@@ -1844,7 +2233,7 @@ export function mountWorkspace(
       col.style.width = `${width}px`;
       table.style.width = `${drag.total + width - drag.width}px`;
       grip.setAttribute('aria-valuenow', String(width));
-      fitPills();
+      widthGeometryChanged();
     });
     const end = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.id) return;
@@ -1875,13 +2264,14 @@ export function mountWorkspace(
   }
 
   function renderGroupHeader(
-    group: RowGroup,
-    folded: boolean,
-    start: number,
+    entry: Extract<VirtualRow, { kind: 'group' }>,
     colspan: number,
     tag: string | undefined,
   ): HTMLTableRowElement {
-    const { value, rows } = group;
+    const {
+      group: { value, rows },
+      folded,
+    } = entry;
     const label =
       value === null
         ? t('missingGroup')
@@ -1892,18 +2282,16 @@ export function mountWorkspace(
             : value;
     const line = element('tr', 'zb-group');
     const heading = element('td');
+    heading.tabIndex = -1;
     heading.colSpan = colspan;
     const toggle = button(
       `${folded ? '▸' : '▾'} ${label} (${rows.length})`,
-      () => {
-        if (folded) foldedGroups.delete(value);
-        else foldedGroups.add(value);
-        setPage(Math.floor(start / PAGE_SIZE));
-      },
+      () => setGroupFolded(entry, !folded),
       'zb-group-toggle',
       `${label} (${rows.length})`,
     );
     toggle.setAttribute('aria-expanded', String(!folded));
+    toggle.tabIndex = -1;
     focusKey(toggle, `group:${JSON.stringify(value)}`);
     heading.append(toggle);
     line.append(heading);
@@ -1917,16 +2305,10 @@ export function mountWorkspace(
 
   function renderRow(row: Row, columns: readonly Column[]): HTMLTableRowElement {
     const line = element('tr');
-    line.tabIndex = 0;
+    line.setAttribute('aria-selected', String(selected.has(row.id)));
     line.title = t('openRow');
     line.dataset.itemId = String(row.id);
-    focusKey(line, `row:${row.id}`);
-    line.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && event.target === line) {
-        event.preventDefault();
-        openRow(row, row.pdf);
-      }
-    });
+    if (selected.has(row.id)) line.dataset.selected = 'true';
     line.addEventListener('dblclick', (event) => {
       const target = event.target as Element | null;
       if (
@@ -1939,20 +2321,25 @@ export function mountWorkspace(
     const selectCell = element('td', 'zb-select-cell');
     const check = input(scopedName(t('selectItem'), row.title || t('untitled')));
     check.type = 'checkbox';
+    check.tabIndex = -1;
+    check.checked = selected.has(row.id);
     check.dataset.selectItem = String(row.id);
     focusKey(check, `select:${row.id}`);
     check.addEventListener('click', (event) => selectItem(row.id, check.checked, event.shiftKey));
     selectCell.append(check);
     line.append(selectCell);
-    for (const column of columns)
-      line.append(
-        cells.render(
-          row,
-          column,
-          propertyFor(column),
-          cellValue(row, column, preferences.properties),
-        ),
+    for (const column of columns) {
+      const cell = cells.render(
+        row,
+        column,
+        propertyFor(column),
+        cellValue(row, column, preferences.properties),
       );
+      cell.tabIndex = -1;
+      const control = cell.querySelector<HTMLElement>('button, input');
+      if (control) control.tabIndex = -1;
+      line.append(cell);
+    }
     const tail = element('td', 'zb-table-tail');
     tail.setAttribute('aria-hidden', 'true');
     line.append(tail);
@@ -1966,16 +2353,24 @@ export function mountWorkspace(
     controls: HTMLDivElement;
     close: (restore: boolean) => void;
   } {
-    closeEditor?.(false);
+    recycleEditor?.();
     const controls = element('div', 'zb-editor');
     cell.append(controls);
-    opener.hidden = true;
+    opener.classList.add('zb-editor-opener');
+    if (tableWrap.clientHeight) {
+      const bounds = cell.getBoundingClientRect();
+      const viewport = tableWrap.getBoundingClientRect();
+      controls.toggleAttribute('data-above', viewport.bottom - bounds.bottom < 150);
+      controls.toggleAttribute('data-end', viewport.right - bounds.left < 300);
+    }
     function close(restore: boolean): void {
       if (closeEditor !== close) return;
       closeEditor = undefined;
+      recycleEditor = undefined;
+      editorKey = undefined;
       controls.remove();
-      opener.hidden = false;
-      if (restore) opener.focus();
+      opener.classList.remove('zb-editor-opener');
+      if (restore) cell.focus({ preventScroll: true });
       // Keep the input and controls stable during notifier refreshes, including
       // when a mutation would filter its own row out of the current view.
       if (!disposed && result !== atOpen)
@@ -1985,13 +2380,7 @@ export function mountWorkspace(
     }
     const atOpen = result;
     closeEditor = close;
-    controls.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && !event.isComposing) {
-        event.preventDefault();
-        event.stopPropagation();
-        close(true);
-      }
-    });
+    recycleEditor = () => close(false);
     return { controls, close };
   }
 
@@ -2021,6 +2410,7 @@ export function mountWorkspace(
       const next = value.trim();
       if (next !== current) saveCell(host.setProperty(row.id, property.key, next || null));
     };
+    recycleEditor = () => save(field.value, false);
     const clear = button(
       t('clear'),
       () => save('', true),
@@ -2035,13 +2425,11 @@ export function mountWorkspace(
       if (!event.relatedTarget || !controls.contains(event.relatedTarget as Node))
         save(field.value, false);
     });
-    field.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.isComposing) {
-        event.preventDefault();
-        event.stopPropagation();
-        save(field.value, true);
-      }
-    });
+    editorKey = (event) => {
+      if (event.key !== 'Enter' || event.target !== field) return false;
+      save(field.value, true);
+      return true;
+    };
     field.focus();
     field.select();
   }
@@ -2116,6 +2504,24 @@ export function mountWorkspace(
     );
     controls.append(selections, buttons);
     closeOnBlur(controls, close);
+    editorKey = (event) => {
+      const index = choices.indexOf(event.target as HTMLButtonElement);
+      if (index < 0) return false;
+      const step =
+        event.key === 'ArrowDown' || event.key === 'ArrowRight'
+          ? 1
+          : event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+            ? -1
+            : 0;
+      if (!step) return false;
+      for (let next = index + step; next >= 0 && next < choices.length; next += step) {
+        if (!choices[next]!.disabled) {
+          choices[next]!.focus({ preventScroll: true });
+          break;
+        }
+      }
+      return true;
+    };
     (
       choices.find((choice) => choice.getAttribute('aria-pressed') === 'true') ??
       choices[0] ??
@@ -2172,6 +2578,11 @@ export function mountWorkspace(
       button(t('done'), () => close(true)),
     );
     closeOnBlur(controls, close);
+    recycleEditor = () => {
+      const tag = field.value.trim();
+      close(false);
+      if (tag && !chosen.has(tag)) saveCell(host.changeTag(row.id, tag, true));
+    };
 
     function choose(tag: string): void {
       if (!tag || chosen.has(tag)) return;
@@ -2235,9 +2646,11 @@ export function mountWorkspace(
     disposed = true;
     unsubscribe();
     disposeSync?.();
-    root.removeEventListener('keydown', workspaceKeys);
+    keyTarget.removeEventListener('keydown', captureKeys as EventListener, true);
     window?.clearTimeout(searchTimer);
     if (fitFrame !== undefined) window?.cancelAnimationFrame(fitFrame);
+    if (virtualFrame !== undefined) window?.cancelAnimationFrame(virtualFrame);
+    resizeObserver?.disconnect();
     for (const [region, listener] of pendingRenders)
       region.removeEventListener('focusout', listener);
     pendingRenders.clear();
