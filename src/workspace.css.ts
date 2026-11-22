@@ -120,8 +120,9 @@ export const workspaceCSS = String.raw`
   align-items: center;
   gap: 0.25rem;
   margin-inline-start: auto;
-  flex: 0 1 19rem;
+  flex: 1 1 13rem;
   min-width: min(100%, 13rem);
+  max-width: 19rem;
 }
 .zb-workspace .zb-search input { flex: 1; min-width: 0; }
 .zb-workspace details { max-width: 100%; }
@@ -290,7 +291,7 @@ export const workspaceCSS = String.raw`
   place-items: center;
   width: 100%;
   padding: 0;
-  color: var(--zb-accent);
+  color: color-mix(in srgb, var(--zb-accent) 70%, var(--zb-text));
 }
 .zb-workspace .zb-pdf-mark {
   display: grid;
