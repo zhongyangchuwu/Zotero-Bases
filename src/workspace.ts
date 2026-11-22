@@ -209,6 +209,7 @@ export function mountWorkspace(
 ): () => void {
   const doc = root.ownerDocument;
   const window = doc.defaultView;
+  const narrowWindow = options.popOut ? undefined : window?.matchMedia?.('(max-width: 72rem)');
   const zh = options.language === 'zh-CN';
   const t = (key: keyof typeof words): string => words[key][zh ? 1 : 0];
   const mountId = `zb-${++nextId}`;
@@ -441,6 +442,21 @@ export function mountWorkspace(
   );
   density.addEventListener('change', () => updateView({ density: density.value as Density }));
   const searchControl = element('div', 'zb-search');
+  const searchField = element('div', 'zb-search-field');
+  searchField.id = `${mountId}-search`;
+  const searchToggle = button(
+    '',
+    () => {
+      if (searchField.hidden) focusSearch();
+      else closeSearch();
+    },
+    'zb-tool-icon zb-search-toggle',
+    t('search'),
+  );
+  searchToggle.hidden = true;
+  searchToggle.setAttribute('aria-controls', searchField.id);
+  searchToggle.setAttribute('aria-expanded', 'false');
+  searchToggle.setAttribute('aria-keyshortcuts', '/');
   const search = input(t('search'));
   search.setAttribute('role', 'searchbox');
   search.setAttribute('aria-keyshortcuts', '/');
@@ -455,7 +471,12 @@ export function mountWorkspace(
     t('clearSearch'),
   );
   clearSearchButton.hidden = true;
-  searchControl.append(search, clearSearchButton);
+  searchField.append(search, clearSearchButton);
+  searchControl.append(searchToggle, searchField);
+  searchControl.addEventListener('focusout', (event) => {
+    if (event.relatedTarget && !searchControl.contains(event.relatedTarget as Node))
+      closeSearch(false);
+  });
   const propertyList = element('div');
   const warning = element('div', 'zb-warning zb-line');
   const filterWarning = element('span', 'zb-line');
@@ -507,6 +528,8 @@ export function mountWorkspace(
   panel.append(toolbar, warning, bulkBar, status, tableWrap, tableStatus);
   surface.append(top, panel, tagValues);
   root.append(style, surface);
+  syncSearchMode();
+  narrowWindow?.addEventListener('change', syncSearchMode);
   syncDensity();
   search.addEventListener('compositionstart', () => {
     composingSearch = true;
@@ -532,7 +555,42 @@ export function mountWorkspace(
   resizeObserver?.observe(tableWrap);
   surface.addEventListener('pointerdown', (event) => {
     if (viewActions.open && !viewActions.contains(event.target as Node)) viewActions.open = false;
+    if (!searchControl.contains(event.target as Node)) closeSearch(false);
   });
+
+  function setSearchExpanded(expanded: boolean): void {
+    searchField.hidden = !expanded;
+    searchToggle.setAttribute('aria-expanded', String(expanded));
+  }
+
+  function syncSearchMode(): void {
+    const compact = narrowWindow?.matches === true;
+    if (searchControl.hasAttribute('data-compact') === compact) return;
+    const focused = doc.activeElement as HTMLElement | null;
+    const fieldFocused = searchField.contains(focused);
+    searchControl.toggleAttribute('data-compact', compact);
+    searchToggle.hidden = !compact;
+    if (compact) {
+      setSearchExpanded(fieldFocused);
+      top.append(searchControl);
+    } else {
+      setSearchExpanded(true);
+      toolbar.append(searchControl);
+    }
+    if (fieldFocused) focused?.focus({ preventScroll: true });
+    else if (!compact && focused === searchToggle) focusSearch();
+  }
+
+  function focusSearch(): void {
+    if (!searchToggle.hidden) setSearchExpanded(true);
+    search.focus({ preventScroll: true });
+  }
+
+  function closeSearch(restore = true): void {
+    if (searchToggle.hidden || searchField.hidden) return;
+    setSearchExpanded(false);
+    if (restore) searchToggle.focus({ preventScroll: true });
+  }
 
   function queueSearch(): void {
     clearSearchButton.hidden = !search.value;
@@ -546,6 +604,7 @@ export function mountWorkspace(
     const term = search.value.trim();
     if (term === searchTerm) return;
     searchTerm = term;
+    searchToggle.toggleAttribute('data-filtering', !!term);
     evaluate(true);
   }
 
@@ -610,6 +669,14 @@ export function mountWorkspace(
       viewActionsTrigger.focus();
       return;
     }
+    if (event.key === 'Escape' && searchControl.contains(target)) {
+      if (search.value) clearSearch();
+      else if (!searchToggle.hidden && !searchField.hidden) closeSearch();
+      else if (selected.size) clearSelection();
+      else return;
+      event.preventDefault();
+      return;
+    }
     if (
       target !== search &&
       target?.closest('input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor')
@@ -617,13 +684,10 @@ export function mountWorkspace(
       return;
     if (event.key === '/' && target !== search) {
       event.preventDefault();
-      search.focus();
+      focusSearch();
     } else if (event.key === 'Escape' && search.value) {
       event.preventDefault();
       clearSearch();
-    } else if (event.key === 'Escape' && target === search && selected.size) {
-      event.preventDefault();
-      clearSelection();
     }
   }
 
@@ -2647,6 +2711,7 @@ export function mountWorkspace(
     unsubscribe();
     disposeSync?.();
     keyTarget.removeEventListener('keydown', captureKeys as EventListener, true);
+    narrowWindow?.removeEventListener('change', syncSearchMode);
     window?.clearTimeout(searchTimer);
     if (fitFrame !== undefined) window?.cancelAnimationFrame(fitFrame);
     if (virtualFrame !== undefined) window?.cancelAnimationFrame(virtualFrame);

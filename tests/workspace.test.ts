@@ -400,6 +400,50 @@ describe('Zotero Bases workspace', () => {
     }
   });
 
+  it('keeps narrow-window search and its filter intact when collapsing or resizing', async () => {
+    const media = Object.assign(new EventTarget(), { matches: true });
+    vi.stubGlobal('matchMedia', () => media);
+    vi.useFakeTimers();
+    try {
+      const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }]);
+      const { root } = attach(host);
+      await settle();
+      const trigger = get<HTMLButtonElement>(root, 'button[aria-controls][aria-expanded="false"]');
+      const search = get<HTMLInputElement>(root, '[role=searchbox]');
+      const field = get(root, `#${trigger.getAttribute('aria-controls')}`);
+      const grid = get(root, '.zb-table-wrap');
+      expect(field.hidden).toBe(true);
+      trigger.click();
+      expect(document.activeElement).toBe(search);
+      type(search, 'Beta');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(rowIds(root)).toEqual([2]);
+      grid.focus();
+      expect(field.hidden).toBe(true);
+      expect(rowIds(root)).toEqual([2]);
+
+      key(grid, '/');
+      expect(field.hidden).toBe(false);
+      expect(document.activeElement).toBe(search);
+      for (const narrow of [false, true]) {
+        media.matches = narrow;
+        media.dispatchEvent(new Event('change'));
+        expect(trigger.hidden).toBe(!narrow);
+        expect(field.hidden).toBe(false);
+        expect(document.activeElement).toBe(search);
+        expect(rowIds(root)).toEqual([2]);
+      }
+      key(search, 'Escape');
+      expect(rowIds(root)).toEqual([1, 2]);
+      key(search, 'Escape');
+      expect(field.hidden).toBe(true);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('adjusts column width without sorting, restores it on remount and resets on double click', async () => {
     const { host } = fixture();
     const { root, teardown } = attach(host);

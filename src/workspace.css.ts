@@ -25,6 +25,7 @@ export const workspaceCSS = String.raw`
   --zb-pill-bg: color-mix(in srgb, var(--zb-surface) 88%, var(--zb-text));
   --zb-pill-border: color-mix(in srgb, var(--zb-surface) 78%, var(--zb-text));
   --zb-row-hover: color-mix(in srgb, var(--zb-surface) 94%, var(--zb-text));
+  --zb-floating-shadow: 0 2px 5px rgb(0 0 0 / 12%), 0 8px 20px rgb(0 0 0 / 16%);
   --zb-row-height: 34px;
   color-scheme: light dark;
   color: var(--zb-text);
@@ -53,6 +54,7 @@ export const workspaceCSS = String.raw`
     --zb-light-warning-text: #ffe4a3;
     --zb-light-warning-border: #968354;
     --zb-light-danger: #ffaaaa;
+    --zb-floating-shadow: 0 2px 5px rgb(0 0 0 / 30%), 0 8px 20px rgb(0 0 0 / 36%);
   }
 }
 .zb-workspace, .zb-workspace * { box-sizing: border-box; }
@@ -137,13 +139,53 @@ export const workspaceCSS = String.raw`
   pointer-events: none;
 }
 .zb-workspace .zb-search {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
   margin-inline-start: auto;
   flex: 1 1 13rem;
   min-width: min(100%, 13rem);
   max-width: 19rem;
+}
+.zb-workspace .zb-search-field { display: flex; align-items: center; gap: 0.25rem; }
+.zb-workspace .zb-search[data-compact] { flex: none; min-width: 0; }
+.zb-workspace .zb-search[data-compact] .zb-search-field {
+  position: absolute;
+  inset-block-start: calc(100% + 0.3rem);
+  inset-inline-end: 0;
+  z-index: 5;
+  width: min(19rem, 100%);
+  padding: 0.35rem;
+  border: 1px solid var(--zb-border);
+  border-radius: 0.35rem;
+  background: var(--zb-surface);
+  box-shadow: var(--zb-floating-shadow);
+}
+.zb-workspace .zb-search-toggle {
+  position: relative;
+  color: var(--zb-muted);
+}
+.zb-workspace .zb-search-toggle:is([data-filtering], [aria-expanded='true']) {
+  color: var(--zb-accent);
+  border-color: var(--zb-accent);
+  background: var(--zb-selected);
+}
+.zb-workspace .zb-search-toggle::before {
+  content: '';
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  transform: translate(-0.08rem, -0.08rem);
+}
+.zb-workspace .zb-search-toggle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.38rem;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: translate(0.15rem, 0.11rem) rotate(45deg);
+  transform-origin: left center;
 }
 .zb-workspace .zb-search input { flex: 1; min-width: 0; }
 .zb-workspace details { max-width: 100%; }
@@ -378,7 +420,7 @@ export const workspaceCSS = String.raw`
   border: 1px solid var(--zb-border);
   border-radius: 0.35rem;
   background: var(--zb-surface);
-  box-shadow: 0 3px 14px color-mix(in srgb, var(--zb-text) 20%, transparent);
+  box-shadow: var(--zb-floating-shadow);
   padding: 0.38rem;
   white-space: normal;
 }
