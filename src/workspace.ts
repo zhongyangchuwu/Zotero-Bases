@@ -441,8 +441,7 @@ export function mountWorkspace(
     activeView().density ?? 'compact',
   );
   density.addEventListener('change', () => updateView({ density: density.value as Density }));
-  const searchControl = element('div', 'zb-search');
-  const searchField = element('div', 'zb-search-field');
+  const searchField = element('div', 'zb-search');
   searchField.id = `${mountId}-search`;
   const searchToggle = button(
     '',
@@ -472,11 +471,7 @@ export function mountWorkspace(
   );
   clearSearchButton.hidden = true;
   searchField.append(search, clearSearchButton);
-  searchControl.append(searchToggle, searchField);
-  searchControl.addEventListener('focusout', (event) => {
-    if (event.relatedTarget && !searchControl.contains(event.relatedTarget as Node))
-      closeSearch(false);
-  });
+  top.append(searchToggle);
   const propertyList = element('div');
   const warning = element('div', 'zb-warning zb-line');
   const filterWarning = element('span', 'zb-line');
@@ -505,7 +500,7 @@ export function mountWorkspace(
     propertyDetails,
     withChevron(density),
     retry,
-    searchControl,
+    searchField,
   );
   const bulkBar = element('section', 'zb-bulk zb-line');
   named(bulkBar, t('bulkEdit'));
@@ -555,8 +550,18 @@ export function mountWorkspace(
   resizeObserver?.observe(tableWrap);
   surface.addEventListener('pointerdown', (event) => {
     if (viewActions.open && !viewActions.contains(event.target as Node)) viewActions.open = false;
-    if (!searchControl.contains(event.target as Node)) closeSearch(false);
+    dismissSearchOutside(event);
   });
+  if (narrowWindow) surface.addEventListener('focusin', dismissSearchOutside);
+
+  function ownsSearch(target: Node | null): boolean {
+    return searchToggle.contains(target) || searchField.contains(target);
+  }
+
+  function dismissSearchOutside(event: Event): void {
+    if (!searchToggle.hidden && !searchField.hidden && !ownsSearch(event.target as Node))
+      closeSearch(false);
+  }
 
   function setSearchExpanded(expanded: boolean): void {
     searchField.hidden = !expanded;
@@ -565,20 +570,12 @@ export function mountWorkspace(
 
   function syncSearchMode(): void {
     const compact = narrowWindow?.matches === true;
-    if (searchControl.hasAttribute('data-compact') === compact) return;
-    const focused = doc.activeElement as HTMLElement | null;
-    const fieldFocused = searchField.contains(focused);
-    searchControl.toggleAttribute('data-compact', compact);
+    if (searchToggle.hidden === !compact) return;
+    const focused = doc.activeElement;
+    surface.toggleAttribute('data-compact-search', compact);
     searchToggle.hidden = !compact;
-    if (compact) {
-      setSearchExpanded(fieldFocused);
-      top.append(searchControl);
-    } else {
-      setSearchExpanded(true);
-      toolbar.append(searchControl);
-    }
-    if (fieldFocused) focused?.focus({ preventScroll: true });
-    else if (!compact && focused === searchToggle) focusSearch();
+    setSearchExpanded(!compact || searchField.contains(focused));
+    if (!compact && focused === searchToggle) focusSearch();
   }
 
   function focusSearch(): void {
@@ -669,7 +666,7 @@ export function mountWorkspace(
       viewActionsTrigger.focus();
       return;
     }
-    if (event.key === 'Escape' && searchControl.contains(target)) {
+    if (event.key === 'Escape' && ownsSearch(target)) {
       if (search.value) clearSearch();
       else if (!searchToggle.hidden && !searchField.hidden) closeSearch();
       else if (selected.size) clearSelection();

@@ -116,7 +116,7 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-sync-location { margin-block-start: 0.35rem; }
 .zb-workspace .zb-sync-location button { justify-self: start; }
 .zb-workspace .zb-panel { display: flex; flex-direction: column; gap: 0.55rem; flex: 1; min-height: 0; }
-.zb-workspace .zb-toolbar { align-items: flex-start; }
+.zb-workspace .zb-toolbar { position: relative; align-items: flex-start; }
 .zb-workspace .zb-select-chevron {
   position: relative;
   display: inline-grid;
@@ -139,16 +139,18 @@ export const workspaceCSS = String.raw`
   pointer-events: none;
 }
 .zb-workspace .zb-search {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
   margin-inline-start: auto;
   flex: 1 1 13rem;
   min-width: min(100%, 13rem);
   max-width: 19rem;
 }
-.zb-workspace .zb-search-field { display: flex; align-items: center; gap: 0.25rem; }
-.zb-workspace .zb-search[data-compact] { flex: none; min-width: 0; }
-.zb-workspace .zb-search[data-compact] .zb-search-field {
+.zb-workspace[data-compact-search] .zb-search {
   position: absolute;
-  inset-block-start: calc(100% + 0.3rem);
+  inset-block-start: 0;
+  min-width: 0;
   inset-inline-end: 0;
   z-index: 5;
   width: min(19rem, 100%);
