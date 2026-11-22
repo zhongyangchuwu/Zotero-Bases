@@ -58,7 +58,7 @@ export const workspaceCSS = String.raw`
 .zb-workspace, .zb-workspace * { box-sizing: border-box; }
 .zb-workspace [hidden] { display: none !important; }
 .zb-workspace :is(button, input, select, textarea) { font: inherit; color: inherit; }
-.zb-workspace :is(button, input:not([type='checkbox']), select, textarea) {
+.zb-workspace :where(button, input:not([type='checkbox']), select, textarea) {
   background: var(--zb-surface);
   border: 1px solid var(--zb-border);
   border-radius: 0.3rem;
@@ -68,7 +68,7 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace button, .zb-workspace summary, .zb-workspace input[type='checkbox'] { cursor: pointer; }
 .zb-workspace :is(button, input, select, textarea):disabled { cursor: default; opacity: 0.6; }
-.zb-workspace :is(button, summary, [role='tab']):hover:not(:disabled) { background: var(--zb-selected); }
+.zb-workspace :where(button, summary, [role='tab']):hover:not(:disabled) { background: var(--zb-selected); }
 .zb-workspace :focus-visible { outline: 2px solid var(--zb-accent); outline-offset: 1px; }
 .zb-workspace .zb-bar, .zb-workspace .zb-line, .zb-workspace .zb-tabs,
 .zb-workspace .zb-options, .zb-workspace .zb-pagination {
@@ -165,7 +165,7 @@ export const workspaceCSS = String.raw`
   overflow: auto;
   border: 1px solid var(--zb-border);
   border-radius: 0.35rem;
-  background: var(--zb-surface);
+  background: var(--zb-bg);
 }
 .zb-workspace table { table-layout: fixed; border-spacing: 0; }
 .zb-workspace th, .zb-workspace td {
@@ -178,10 +178,11 @@ export const workspaceCSS = String.raw`
   position: sticky;
   inset-block-start: 0;
   z-index: 1;
-  background: var(--zb-bg);
+  background: var(--zb-surface);
   padding-inline-end: 0.65rem;
 }
 .zb-workspace th button {
+  appearance: none;
   display: block;
   width: 100%;
   overflow: hidden;
@@ -230,6 +231,7 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-group > td { background: var(--zb-bg); }
 .zb-workspace .zb-group-toggle { font-weight: 600; text-align: start; overflow-wrap: anywhere; }
 .zb-workspace .zb-cell-button {
+  appearance: none;
   display: block;
   width: 100%;
   min-width: 0;
@@ -278,6 +280,10 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace .zb-cell-pill { flex: none; white-space: nowrap; }
 .zb-workspace .zb-type-badge { color: var(--zb-muted); }
+.zb-workspace td[data-column^='property:'] .zb-cell-pill:not(.zb-cell-pill-more) {
+  background: color-mix(in srgb, var(--zb-surface) 85%, var(--zb-accent));
+  border-color: color-mix(in srgb, var(--zb-surface) 73%, var(--zb-accent));
+}
 .zb-workspace .zb-cell-pill-more { color: var(--zb-muted); font-variant-numeric: tabular-nums; }
 .zb-workspace .zb-pdf-button {
   display: grid;

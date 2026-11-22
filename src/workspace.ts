@@ -1658,7 +1658,7 @@ export function mountWorkspace(
       ? `${total ? `${pageCount} · ` : ''}${
           zh
             ? `匹配 ${total}／共 ${catalog?.rows.length ?? 0} 条`
-            : `${total} matches / ${catalog?.rows.length ?? 0} items`
+            : `Matched ${total} / ${catalog?.rows.length ?? 0} items`
         }`
       : pageCount;
 

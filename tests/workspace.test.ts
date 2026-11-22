@@ -359,13 +359,13 @@ describe('Zotero Bases workspace', () => {
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([65]);
       expect(groupTitles(root)).toEqual(['2026 (1)']);
-      expect(get(root, '.zb-page-count').textContent).toContain('1 matches / 65 items');
+      expect(get(root, '.zb-page-count').textContent).toContain('Matched 1 / 65 items');
       expect(get<HTMLButtonElement>(root, '.zb-pagination button').disabled).toBe(true);
 
       type(search, 'not present');
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([]);
-      expect(get(root, '.zb-page-count').textContent).toContain('0 matches / 65 items');
+      expect(get(root, '.zb-page-count').textContent).toContain('Matched 0 / 65 items');
       key(search, 'Escape');
       expect(rowIds(root)).toHaveLength(50);
       expect(rowIds(root)).not.toContain(65);
