@@ -132,6 +132,36 @@ describe('cell renderers', () => {
     expect(edit).toHaveBeenCalledWith(row, 'property:Score', score, '0.25', number, opener);
   });
 
+  it('shows consistent reading-state colors in single and multi-select cells', () => {
+    const { render } = fixture();
+    const options = ['Unread', 'In review', 'Done', 'Simulation'];
+    const property: Property = { key: 'Reading State', type: 'single-select', options };
+    const single = options.map((value) =>
+      get(render(row, 'property:Reading State', property, value), '.zb-cell-pill'),
+    );
+    expect(single.slice(0, 3).map((node) => node.dataset.tone)).toEqual([
+      'neutral',
+      'amber',
+      'green',
+    ]);
+    const reversed = [...options].reverse();
+    const multiple = render(
+      { ...row, writable: false },
+      'property:Reading State',
+      { ...property, type: 'multi-select', options: reversed },
+      reversed,
+    );
+    for (const [index, node] of Array.from(
+      multiple.querySelectorAll<HTMLElement>('.zb-cell-pill:not(.zb-cell-pill-more)'),
+    ).entries()) {
+      expect(node.textContent).toBe(reversed[index]);
+      expect(node.dataset.tone).toBe(single[options.length - 1 - index]?.dataset.tone);
+    }
+    expect(
+      get(render(row, 'tags', undefined, ['Done']), '.zb-cell-pill').dataset.tone,
+    ).toBeUndefined();
+  });
+
   it('keeps read-only values non-interactive and toggles editable checkboxes on Enter', () => {
     const { render, edit, toggle } = fixture();
     const reviewed: Property = { key: 'Reviewed', type: 'checkbox' };

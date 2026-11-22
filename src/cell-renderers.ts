@@ -32,6 +32,37 @@ interface PillFit {
   used: number;
 }
 
+const CHOICE_TONES = ['sky', 'violet', 'teal', 'rose'] as const;
+
+function choiceTone(value: string): string {
+  const key = value.normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+  switch (key) {
+    case 'done':
+    case 'completed':
+    case 'read':
+    case '完成':
+    case '已完成':
+    case '已读':
+      return 'green';
+    case 'reading':
+    case 'in progress':
+    case 'in review':
+    case '在读':
+    case '进行中':
+    case '审阅中':
+      return 'amber';
+    case 'unread':
+    case 'to read':
+    case '未读':
+    case '待读':
+      return 'neutral';
+  }
+  // Derive other colors from the label, so filtering and option order never change them.
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = Math.imul(hash, 31) + key.charCodeAt(i);
+  return CHOICE_TONES[(hash >>> 0) % CHOICE_TONES.length]!;
+}
+
 function fitPills(table: HTMLTableElement): void {
   const strips = table.querySelectorAll<HTMLElement>('.zb-cell-pills');
   const wrap = Boolean(table.closest('.zb-workspace[data-density="wrap"]'));
@@ -179,7 +210,11 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     }
     const strip = element('span', 'zb-cell-pills');
     if (!row.writable) strip.title = `${fullText} · ${cell.title}`;
-    for (const pill of pills) strip.append(element('span', 'zb-cell-pill', pill));
+    for (const label of pills) {
+      const pill = element('span', 'zb-cell-pill', label);
+      if (property) pill.dataset.tone = choiceTone(label);
+      strip.append(pill);
+    }
     const more = element('span', 'zb-cell-pill zb-cell-pill-more');
     more.hidden = true;
     strip.append(more);

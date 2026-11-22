@@ -115,6 +115,27 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-sync-location button { justify-self: start; }
 .zb-workspace .zb-panel { display: flex; flex-direction: column; gap: 0.55rem; flex: 1; min-height: 0; }
 .zb-workspace .zb-toolbar { align-items: flex-start; }
+.zb-workspace .zb-select-chevron {
+  position: relative;
+  display: inline-grid;
+  max-width: 100%;
+}
+.zb-workspace .zb-select-chevron > select {
+  appearance: none;
+  padding-inline-end: 1.85rem;
+}
+.zb-workspace .zb-select-chevron::after {
+  content: '';
+  position: absolute;
+  inset-inline-end: 0.7rem;
+  top: 50%;
+  width: 0.45rem;
+  height: 0.45rem;
+  border: solid var(--zb-muted);
+  border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-72%) rotate(45deg);
+  pointer-events: none;
+}
 .zb-workspace .zb-search {
   display: flex;
   align-items: center;
@@ -168,7 +189,7 @@ export const workspaceCSS = String.raw`
   border-radius: 0.35rem;
   background: var(--zb-bg);
 }
-.zb-workspace table { table-layout: fixed; border-spacing: 0; }
+.zb-workspace table { table-layout: fixed; border-spacing: 0; min-width: 100%; }
 .zb-workspace th, .zb-workspace td {
   text-align: start;
   padding: 0.2rem 0.55rem;
@@ -193,6 +214,16 @@ export const workspaceCSS = String.raw`
   padding-inline: 0;
   border-color: transparent;
   background: transparent;
+}
+.zb-workspace th.zb-table-tail { padding-inline: 3px 5px; }
+.zb-workspace .zb-table-tail > button {
+  margin-inline-start: auto;
+  width: 1.8rem;
+  min-height: 1.65rem;
+  height: 1.65rem;
+  display: grid;
+  place-items: center;
+  color: var(--zb-muted);
 }
 .zb-workspace .zb-column-grip {
   position: absolute;
@@ -281,9 +312,15 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace .zb-cell-pill { flex: none; white-space: nowrap; }
 .zb-workspace .zb-type-badge { color: var(--zb-muted); }
-.zb-workspace td[data-column^='property:'] .zb-cell-pill:not(.zb-cell-pill-more) {
-  background: color-mix(in srgb, var(--zb-surface) 85%, var(--zb-accent));
-  border-color: color-mix(in srgb, var(--zb-surface) 73%, var(--zb-accent));
+.zb-workspace [data-tone='green'] { --zb-choice-tone: #23935d; }
+.zb-workspace [data-tone='amber'] { --zb-choice-tone: #d28b14; }
+.zb-workspace [data-tone='sky'] { --zb-choice-tone: #438be0; }
+.zb-workspace [data-tone='violet'] { --zb-choice-tone: #8a70c9; }
+.zb-workspace [data-tone='teal'] { --zb-choice-tone: #269a96; }
+.zb-workspace [data-tone='rose'] { --zb-choice-tone: #be6286; }
+.zb-workspace .zb-cell-pill[data-tone]:not([data-tone='neutral']) {
+  background: color-mix(in srgb, var(--zb-surface) 76%, var(--zb-choice-tone));
+  border-color: color-mix(in srgb, var(--zb-surface) 58%, var(--zb-choice-tone));
 }
 .zb-workspace .zb-cell-pill-more { color: var(--zb-muted); font-variant-numeric: tabular-nums; }
 .zb-workspace .zb-pdf-button {

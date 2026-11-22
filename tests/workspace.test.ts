@@ -326,6 +326,20 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).id).toBe('default');
   });
 
+  it('opens column visibility from the rightmost header and saves a hidden column selection', async () => {
+    const { host } = fixture([sample], { ...defaultView, columns: ['title'] });
+    const { root } = attach(host);
+    await settle();
+    const action = get<HTMLButtonElement>(root, 'thead th:last-child button');
+    expect(action.getAttribute('aria-label')).toBe('Show columns');
+    action.click();
+    const year = get<HTMLInputElement>(root, 'details[open] input[data-focus="year"]');
+    expect(year.checked).toBe(false);
+    year.click();
+    expect(active(host).columns).toEqual(['title', 'year']);
+    expect(cell(root, 'year', 1).textContent).toBe('2024');
+  });
+
   it('searches all pages and combines the result with saved filters and grouping', async () => {
     vi.useFakeTimers();
     try {

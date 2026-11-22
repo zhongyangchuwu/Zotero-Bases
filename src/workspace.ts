@@ -29,6 +29,7 @@ import { workspaceCSS } from './workspace.css';
 const PAGE_SIZE = 50;
 const SEARCH_DELAY = 140;
 const SELECT_COLUMN_WIDTH = 36;
+const COLUMN_ACTION_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH: Readonly<Record<(typeof NATIVE_COLUMNS)[number], number>> = {
   title: 360,
   creators: 180,
@@ -71,6 +72,7 @@ const words = {
   scope: ['Scope', '范围'],
   allLibraries: ['All libraries', '全部文库'],
   columns: ['Columns', '列'],
+  showColumns: ['Show columns', '显示列'],
   sort: ['Sort by', '排序列'],
   direction: ['Sort direction', '排序方向'],
   resizeColumn: ['Resize column', '调整列宽'],
@@ -287,6 +289,12 @@ export function mountWorkspace(
     return node;
   }
 
+  function withChevron(field: HTMLSelectElement): HTMLSpanElement {
+    const wrapper = element('span', 'zb-select-chevron');
+    wrapper.append(field);
+    return wrapper;
+  }
+
   function input(label: string, value = ''): HTMLInputElement {
     const node = element('input');
     named(node, label);
@@ -376,10 +384,7 @@ export function mountWorkspace(
   const renameViewButton = viewAction(t('renameView'), startViewRename);
   const deleteViewButton = viewAction(t('deleteView'), deleteView, 'zb-danger');
   actions.append(
-    viewAction(t('viewSettings'), () => {
-      columnDetails.open = true;
-      columnDetails.querySelector('summary')?.focus();
-    }),
+    viewAction(t('viewSettings'), showColumns),
     copyViewButton,
     renameViewButton,
     deleteViewButton,
@@ -452,7 +457,7 @@ export function mountWorkspace(
     filterDetails,
     groupDetails,
     propertyDetails,
-    density,
+    withChevron(density),
     retry,
     searchControl,
   );
@@ -800,6 +805,11 @@ export function mountWorkspace(
     deleteViewButton.disabled = views.length === 1;
   }
 
+  function showColumns(): void {
+    columnDetails.open = true;
+    columnDetails.querySelector('summary')?.focus();
+  }
+
   function renderScope(): void {
     const scope = activeView().scope;
     const items = host
@@ -820,7 +830,7 @@ export function mountWorkspace(
       const field = select(t('scope'), items, scope);
       focusKey(field, 'scope');
       field.addEventListener('change', () => updateView({ scope: field.value }));
-      scopeSlot.replaceChildren(element('span', '', t('scope')), field);
+      scopeSlot.replaceChildren(element('span', '', t('scope')), withChevron(field));
     });
   }
 
@@ -1724,6 +1734,13 @@ export function mountWorkspace(
         heading.append(resizeGrip(table, col, column, caption));
         titles.append(heading);
       }
+      // The unsized final column takes only the surplus in the fixed table layout.
+      colgroup.append(element('col'));
+      const actionCell = element('th', 'zb-table-tail');
+      const addColumn = button('+', showColumns, 'zb-tool-icon', t('showColumns'));
+      focusKey(addColumn, 'show-columns');
+      actionCell.append(addColumn);
+      titles.append(actionCell);
       header.append(titles);
       const body = element('tbody');
       if (groups) {
@@ -1733,7 +1750,7 @@ export function mountWorkspace(
           const folded = foldedGroups.has(group.value);
           const groupEnd = start + (folded ? 1 : group.rows.length);
           if (groupEnd > offset) {
-            body.append(renderGroupHeader(group, folded, start, columns.length + 1, tag));
+            body.append(renderGroupHeader(group, folded, start, columns.length + 2, tag));
             if (!folded) {
               const limit = Math.min(group.rows.length, end - start);
               for (let index = Math.max(0, offset - start); index < limit; index++)
@@ -1763,7 +1780,7 @@ export function mountWorkspace(
   function updateTableWidths(table = tableWrap.querySelector('table')): void {
     if (!table) return;
     const view = activeView();
-    let total = SELECT_COLUMN_WIDTH;
+    let total = SELECT_COLUMN_WIDTH + COLUMN_ACTION_WIDTH;
     const headers = table.tHead?.rows[0]?.cells;
     const columns = table.querySelectorAll<HTMLTableColElement>('col[data-column]');
     for (let index = 0; index < columns.length; index++) {
@@ -1912,7 +1929,11 @@ export function mountWorkspace(
     });
     line.addEventListener('dblclick', (event) => {
       const target = event.target as Element | null;
-      if (!target?.closest('button, input, select, label, .zb-editor, .zb-select-cell'))
+      if (
+        !target?.closest(
+          'button, input, select, label, .zb-editor, .zb-select-cell, .zb-table-tail',
+        )
+      )
         openRow(row, row.pdf);
     });
     const selectCell = element('td', 'zb-select-cell');
@@ -1932,6 +1953,9 @@ export function mountWorkspace(
           cellValue(row, column, preferences.properties),
         ),
       );
+    const tail = element('td', 'zb-table-tail');
+    tail.setAttribute('aria-hidden', 'true');
+    line.append(tail);
     return line;
   }
 
