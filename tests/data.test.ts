@@ -583,6 +583,14 @@ describe('Zotero Bases host', () => {
     expect(owner.ZoteroPane.viewAttachment.mock.calls).toEqual([[3]]);
     expect(owner.ZoteroPane.selectItem.mock.calls).toEqual([[2], [1]]);
 
+    const snapshot = nativeItem(4, 8, '', { parentID: 5, regular: false });
+    const otherPDF = nativeItem(6, 8, '', { parentID: 5, pdf: true, regular: false });
+    const mixed = nativeItem(5, 8, '', { attachments: [4, 6], best: snapshot });
+    const mixedLibrary = harness([snapshot, mixed, otherPDF]);
+    await mixedLibrary.host.openItem(5, true);
+    expect(mixedLibrary.owner.ZoteroPane.viewAttachment).toHaveBeenCalledExactlyOnceWith(6);
+    expect(mixedLibrary.owner.ZoteroPane.selectItem).not.toHaveBeenCalled();
+
     const listener = vi.fn();
     const unsubscribe = host.subscribe(listener);
     const entry = [...nativeObservers.values()][0]!;

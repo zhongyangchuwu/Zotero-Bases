@@ -19,6 +19,9 @@ export const NATIVE_COLUMNS = [
 ] as const;
 export type NativeColumn = (typeof NATIVE_COLUMNS)[number];
 export type Column = NativeColumn | `property:${string}`;
+export type Density = 'compact' | 'comfortable' | 'wrap';
+export const MIN_COLUMN_WIDTH = 48;
+export const MAX_COLUMN_WIDTH = 1600;
 export type Direction = 'asc' | 'desc';
 export type Operator =
   | 'contains'
@@ -48,6 +51,8 @@ export interface View {
   readonly sort: { readonly column: Column; readonly direction: Direction };
   readonly filters: readonly Filter[];
   readonly group?: Grouping;
+  readonly density?: Density;
+  readonly columnWidths?: Readonly<Partial<Record<Column, number>>>;
 }
 
 export interface Scope {

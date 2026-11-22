@@ -243,6 +243,119 @@ describe('catalog filtering', () => {
   });
 });
 
+describe('catalog search', () => {
+  it('searches the whole catalog and the complete creator list before sorting', () => {
+    const large: Catalog = {
+      rows: Array.from({ length: 70 }, (_, index) =>
+        row(index + 1, {
+          title: index === 64 ? 'Target paper' : `Other paper ${index + 1}`,
+          creators:
+            index === 64
+              ? Array.from({ length: 20 }, (_, author) => `Author ${author + 1}`).join('; ')
+              : '',
+        }),
+      ),
+      tags: new Set(),
+    };
+    expect(
+      queryCatalog(large, view(), properties, 'en-US', 'author 20').rows.map(({ id }) => id),
+    ).toEqual([65]);
+  });
+
+  it('matches case-folded tokens across native fields and ignores unrelated fields', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, {
+          title: 'Cafe\u0301 studies',
+          creators: 'Ada Lovelace',
+          source: 'Science Journal',
+          year: '2024',
+          tags: ['Deep Learning'],
+          type: 'journalArticle',
+          added: '2025-01-01',
+          pdf: true,
+        }),
+        row(2, { title: 'Café studies', creators: 'Grace Hopper', year: '2020' }),
+      ],
+      tags: new Set(['Deep Learning']),
+    };
+    expect(
+      queryCatalog(items, view(), properties, 'en-US', 'café').rows.map(({ id }) => id),
+    ).toEqual([1, 2]);
+    for (const search of ['ADA', 'science', '2024', 'learning']) {
+      expect(
+        queryCatalog(items, view(), properties, 'en-US', search).rows.map(({ id }) => id),
+      ).toEqual([1]);
+    }
+    expect(
+      queryCatalog(items, view(), properties, 'en-US', '  CAFÉ \t ada  2024\n learning ').rows.map(
+        ({ id }) => id,
+      ),
+    ).toEqual([1]);
+    for (const search of ['journalArticle', '2025-01-01']) {
+      expect(queryCatalog(items, view(), properties, 'en-US', search).rows).toEqual([]);
+    }
+    expect(
+      queryCatalog(items, view(), properties, 'en-US', ' \t\n ').rows.map(({ id }) => id),
+    ).toEqual([1, 2]);
+  });
+
+  it('searches only visible custom values, including individual options and localized checkboxes', () => {
+    const visible: View = {
+      ...view(),
+      columns: [
+        'title',
+        'property:Memo',
+        'property:Method',
+        'property:Reviewed',
+        'property:Removed',
+      ],
+    };
+    expect(queryCatalog(catalog, view(), properties, 'en-US', 'equation').rows).toEqual([]);
+    for (const search of ['equation', 'transformer', 'diffusion', 'yes', 'true']) {
+      expect(queryCatalog(catalog, visible, properties, 'en-US', search).rows[0]?.id).toBe(1);
+    }
+    expect(
+      queryCatalog(catalog, visible, properties, 'en-US', 'equation diffusion').rows.map(
+        ({ id }) => id,
+      ),
+    ).toEqual([1]);
+    expect(
+      queryCatalog(catalog, visible, properties, 'zh-CN', '是').rows.map(({ id }) => id),
+    ).toEqual([1]);
+    expect(
+      queryCatalog(catalog, visible, properties, 'zh-CN', '否').rows.map(({ id }) => id),
+    ).toEqual([3, 2]);
+  });
+
+  it('ANDs search with valid saved filters, preserves invalid indices and typed sorting', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { title: 'Target', extra: 'Confidence: 10\nStatus: Reading' }),
+        row(2, { title: 'Target', extra: 'Confidence: 2\nStatus: Reading' }),
+        row(3, { title: 'Target', extra: 'Confidence: 1\nStatus: Done' }),
+        row(4, { title: 'Other', extra: 'Confidence: 0\nStatus: Reading' }),
+      ],
+      tags: new Set(),
+    };
+    const result = queryCatalog(
+      items,
+      view(
+        [
+          { column: 'property:Removed', operator: 'has', value: '' },
+          { column: 'property:Status', operator: 'equals', value: 'Reading' },
+        ],
+        'property:Confidence',
+      ),
+      properties,
+      'en-US',
+      'target',
+    );
+    expect(result.invalid).toEqual([0]);
+    expect(result.rows.map(({ id }) => id)).toEqual([2, 1]);
+  });
+});
+
 describe('catalog sorting', () => {
   it('uses locale and natural text order, with stable ties and no input mutation', () => {
     const titles: Catalog = {

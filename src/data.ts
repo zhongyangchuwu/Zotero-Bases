@@ -464,8 +464,14 @@ export function createWorkspaceHost(
       const item = await requireItem(id);
       if (pdf) {
         await zotero.Items.loadDataTypes([item], ['itemData', 'childItems']);
-        const attachment = await item.getBestAttachment();
-        if (attachment && !attachment.deleted && attachment.isPDFAttachment()) {
+        const best = await item.getBestAttachment();
+        const attachment =
+          best && !best.deleted && best.isPDFAttachment()
+            ? best
+            : (await zotero.Items.getAsync(item.getAttachments(false))).find(
+                (candidate) => !candidate.deleted && candidate.isPDFAttachment(),
+              );
+        if (attachment) {
           await pane.viewAttachment(attachment.id);
           return;
         }

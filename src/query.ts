@@ -209,11 +209,64 @@ function sortKey(value: PropertyValue, kind: Kind): SortKey {
   return value;
 }
 
+function compileSearch(
+  search: string,
+  view: View,
+  properties: readonly Property[],
+  locale: string,
+): ((row: Row) => boolean) | undefined {
+  const text = search.trim().normalize('NFC').toLocaleLowerCase(locale);
+  if (!text) return undefined;
+  const terms = text.split(/\s+/);
+  const matched = terms.map(() => false);
+  const visibleProperties: Property[] = [];
+  for (const column of view.columns) {
+    const property = propertyIn(column, properties);
+    if (property) visibleProperties.push(property);
+  }
+  const chinese = locale.toLowerCase().startsWith('zh');
+  let remaining = 0;
+  const matchText = (value: string): void => {
+    if (!value || !remaining) return;
+    const folded = value.normalize('NFC').toLocaleLowerCase(locale);
+    for (let index = 0; index < terms.length; index++) {
+      if (!matched[index] && folded.includes(terms[index]!)) {
+        matched[index] = true;
+        remaining--;
+      }
+    }
+  };
+  const matchValue = (value: PropertyValue): void => {
+    if (typeof value === 'string') matchText(value);
+    else if (typeof value === 'boolean') {
+      matchText(value ? 'true' : 'false');
+      matchText(chinese ? (value ? '是' : '否') : value ? 'yes' : 'no');
+    } else if (value) {
+      for (const item of value) matchText(item);
+    }
+  };
+  return (row) => {
+    matched.fill(false);
+    remaining = terms.length;
+    matchText(row.title);
+    matchText(row.creators);
+    matchText(row.source);
+    matchText(row.year);
+    for (const tag of row.tags) matchText(tag);
+    for (const property of visibleProperties) {
+      if (!remaining) break;
+      matchValue(readProperty(row.extra, property));
+    }
+    return remaining === 0;
+  };
+}
+
 export function queryCatalog(
   catalog: Catalog,
   view: View,
   properties: readonly Property[],
   locale: string,
+  search = '',
 ): QueryResult {
   const invalid: number[] = [];
   const checks: ((row: Row) => boolean)[] = [];
@@ -224,9 +277,13 @@ export function queryCatalog(
     else invalid.push(index);
   }
 
-  const rows = checks.length
-    ? catalog.rows.filter((row) => checks.every((check) => check(row)))
-    : catalog.rows;
+  const matchesSearch = compileSearch(search, view, properties, locale);
+  const rows =
+    checks.length || matchesSearch
+      ? catalog.rows.filter(
+          (row) => checks.every((check) => check(row)) && (!matchesSearch || matchesSearch(row)),
+        )
+      : catalog.rows;
   const sort = columnInfo(view.sort.column, properties);
   if (!sort || rows.length < 2) return { rows, invalid };
 

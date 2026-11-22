@@ -1,7 +1,8 @@
-import { NATIVE_COLUMNS } from './contracts';
+import { MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, NATIVE_COLUMNS } from './contracts';
 import type {
   Column,
   ConfigChange,
+  Density,
   Filter,
   Grouping,
   Preferences,
@@ -94,6 +95,24 @@ function validSort(value: unknown): value is View['sort'] {
   return object(value) && column(value.column) && isDirection(value.direction);
 }
 
+function validDensity(value: unknown): value is Density {
+  return value === 'compact' || value === 'comfortable' || value === 'wrap';
+}
+
+function validColumnWidths(value: unknown): value is NonNullable<View['columnWidths']> {
+  return (
+    object(value) &&
+    Object.entries(value).every(
+      ([key, width]) =>
+        column(key) &&
+        typeof width === 'number' &&
+        Number.isFinite(width) &&
+        width >= MIN_COLUMN_WIDTH &&
+        width <= MAX_COLUMN_WIDTH,
+    )
+  );
+}
+
 function view(value: unknown, strict = false): View | undefined {
   if (
     !object(value) ||
@@ -107,6 +126,8 @@ function view(value: unknown, strict = false): View | undefined {
   }
   const { sort } = value;
   const group = grouping(value.group);
+  const density = validDensity(value.density) ? value.density : undefined;
+  const columnWidths = validColumnWidths(value.columnWidths) ? value.columnWidths : undefined;
   if (
     strict &&
     (!Array.isArray(value.columns) ||
@@ -114,7 +135,9 @@ function view(value: unknown, strict = false): View | undefined {
       !validSort(sort) ||
       !Array.isArray(value.filters) ||
       !value.filters.every(filter) ||
-      (value.group !== undefined && !group))
+      (value.group !== undefined && !group) ||
+      (value.density !== undefined && !density) ||
+      (value.columnWidths !== undefined && !columnWidths))
   )
     return undefined;
   return {
@@ -131,6 +154,8 @@ function view(value: unknown, strict = false): View | undefined {
           .map(({ column, operator, value }) => ({ column, operator, value }))
       : [],
     ...(group ? { group } : {}),
+    ...(density ? { density } : {}),
+    ...(columnWidths ? { columnWidths } : {}),
   };
 }
 
