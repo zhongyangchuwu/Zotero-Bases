@@ -1,10 +1,13 @@
 import {
+  MAX_COLUMN_WIDTH,
+  MIN_COLUMN_WIDTH,
   NATIVE_COLUMNS,
   type BulkChange,
   type Catalog,
   type Column,
   type ConfigChange,
   type Filter,
+  type Density,
   type Grouping,
   type MutationResult,
   type Operator,
@@ -16,6 +19,7 @@ import {
   type View,
   type WorkspaceHost,
 } from './contracts';
+import { createCellRenderers } from './cell-renderers';
 import { groupRows, isGroupProperty, type RowGroup } from './grouping';
 import { cellValue, filterOperators, queryCatalog, type QueryResult } from './query';
 import type { SyncPort } from './sync';
@@ -23,6 +27,28 @@ import { mountSyncControls } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
 
 const PAGE_SIZE = 50;
+const SEARCH_DELAY = 140;
+const SELECT_COLUMN_WIDTH = 36;
+const DEFAULT_COLUMN_WIDTH: Readonly<Record<(typeof NATIVE_COLUMNS)[number], number>> = {
+  title: 360,
+  creators: 180,
+  year: 70,
+  source: 168,
+  type: 112,
+  tags: 185,
+  pdf: 56,
+  added: 112,
+};
+
+function defaultColumnWidth(column: Column): number {
+  return column.startsWith('property:')
+    ? 140
+    : DEFAULT_COLUMN_WIDTH[column as keyof typeof DEFAULT_COLUMN_WIDTH];
+}
+
+function columnWidth(view: View, column: Column): number {
+  return view.columnWidths?.[column] ?? defaultColumnWidth(column);
+}
 const PROPERTY_TYPES: readonly PropertyType[] = [
   'text',
   'number',
@@ -37,6 +63,8 @@ const words = {
   copyView: ['Copy view', '复制视图'],
   renameView: ['Rename view', '重命名视图'],
   deleteView: ['Delete view', '删除视图'],
+  viewActions: ['View actions', '视图操作'],
+  viewSettings: ['View settings', '视图设置'],
   viewName: ['View name', '视图名称'],
   copySuffix: ['copy', '副本'],
   popOut: ['Open in new window', '在新窗口打开'],
@@ -45,6 +73,13 @@ const words = {
   columns: ['Columns', '列'],
   sort: ['Sort by', '排序列'],
   direction: ['Sort direction', '排序方向'],
+  resizeColumn: ['Resize column', '调整列宽'],
+  density: ['Row density', '行密度'],
+  compact: ['Compact', '紧凑'],
+  comfortable: ['Comfortable', '标准'],
+  wrap: ['Wrap', '展开换行'],
+  search: ['Search this scope', '在当前范围内搜索'],
+  clearSearch: ['Clear search', '清空搜索'],
   asc: ['Ascending', '升序'],
   desc: ['Descending', '降序'],
   grouping: ['Grouping', '分组'],
@@ -65,6 +100,7 @@ const words = {
   type: ['Item type', '条目类型'],
   tags: ['Tags', '标签'],
   pdf: ['PDF', 'PDF'],
+  openPDF: ['Open PDF', '打开 PDF'],
   added: ['Date added', '添加时间'],
   filters: ['Filters', '筛选'],
   filterAnd: ['Match all conditions', '符合所有条件'],
@@ -164,6 +200,7 @@ export function mountWorkspace(
   options: { language: 'zh-CN' | 'en'; popOut?: () => void; sync?: SyncPort },
 ): () => void {
   const doc = root.ownerDocument;
+  const window = doc.defaultView;
   const zh = options.language === 'zh-CN';
   const t = (key: keyof typeof words): string => words[key][zh ? 1 : 0];
   const mountId = `zb-${++nextId}`;
@@ -181,10 +218,29 @@ export function mountWorkspace(
   let selectionAnchor: number | undefined;
   let bulkPending = false;
   let page = 0;
+  let searchTerm = '';
+  let searchTimer: number | undefined;
+  let composingSearch = false;
+  let fitFrame: number | undefined;
   let renameViewId: string | undefined;
   let deleteChoice: { key: string; option?: string } | undefined;
   let closeEditor: ((restore: boolean) => void) | undefined;
   const pendingRenders = new Map<HTMLElement, EventListener>();
+  const cells = createCellRenderers(doc, {
+    text: t,
+    columnName,
+    open: openRow,
+    toggle(row, property, checked) {
+      saveCell(host.setProperty(row.id, property.key, checked ? true : null));
+    },
+    edit(row, column, property, value, cell, opener) {
+      if (column === 'tags') editTags(row, cell, opener);
+      else if (property && isSelectProperty(property.type))
+        editChoices(row, property, value, cell, opener);
+      else if (property)
+        editScalar(row, property, typeof value === 'string' ? value : '', cell, opener);
+    },
+  });
 
   function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -298,17 +354,40 @@ export function mountWorkspace(
   const tabs = element('div', 'zb-tablist');
   tabs.setAttribute('role', 'tablist');
   named(tabs, t('views'));
-  const actions = element('div', 'zb-line zb-view-actions');
+  const viewActions = element('details', 'zb-view-actions');
+  const viewActionsTrigger = element('summary', '', '⋯');
+  named(viewActionsTrigger, t('viewActions'));
+  const actions = element('div', 'zb-pane zb-view-action-list');
+  viewActions.append(viewActionsTrigger, actions);
   const renameSlot = element('div');
   renameSlot.hidden = true;
-  const addViewButton = button(t('newView'), () => createView(false));
-  const copyViewButton = button(t('copyView'), () => createView(true));
-  const renameViewButton = button(t('renameView'), startViewRename);
-  const deleteViewButton = button(t('deleteView'), deleteView, 'zb-danger');
-  actions.append(addViewButton, copyViewButton, renameViewButton, deleteViewButton);
-  viewControls.append(tabs, actions, renameSlot);
+  const addViewButton = button('+', () => createView(false), 'zb-tool-icon', t('newView'));
+  const viewAction = (label: string, run: () => void, className?: string) =>
+    button(
+      label,
+      () => {
+        viewActions.open = false;
+        viewActionsTrigger.focus();
+        run();
+      },
+      className,
+    );
+  const copyViewButton = viewAction(t('copyView'), () => createView(true));
+  const renameViewButton = viewAction(t('renameView'), startViewRename);
+  const deleteViewButton = viewAction(t('deleteView'), deleteView, 'zb-danger');
+  actions.append(
+    viewAction(t('viewSettings'), () => {
+      columnDetails.open = true;
+      columnDetails.querySelector('summary')?.focus();
+    }),
+    copyViewButton,
+    renameViewButton,
+    deleteViewButton,
+  );
+  viewControls.append(tabs, addViewButton, viewActions, renameSlot);
   top.append(viewControls);
-  if (options.popOut) top.append(button(t('popOut'), options.popOut, 'zb-popout'));
+  if (options.popOut)
+    top.append(button('↗', options.popOut, 'zb-popout zb-tool-icon', t('popOut')));
   const disposeSync = options.sync
     ? mountSyncControls(top, options.sync, options.language)
     : undefined;
@@ -321,6 +400,32 @@ export function mountWorkspace(
   const [filterDetails, filterPane] = details(t('filters'));
   const [groupDetails, groupPane] = details(t('grouping'));
   const [propertyDetails, propertyPane] = details(t('properties'));
+  const density = select(
+    t('density'),
+    [
+      ['compact', t('compact')],
+      ['comfortable', t('comfortable')],
+      ['wrap', t('wrap')],
+    ],
+    activeView().density ?? 'compact',
+  );
+  density.addEventListener('change', () => updateView({ density: density.value as Density }));
+  const searchControl = element('div', 'zb-search');
+  const search = input(t('search'));
+  search.setAttribute('role', 'searchbox');
+  search.setAttribute('aria-keyshortcuts', '/');
+  search.placeholder = `${t('search')}  /`;
+  const clearSearchButton = button(
+    '×',
+    () => {
+      search.focus();
+      clearSearch();
+    },
+    'zb-tool-icon',
+    t('clearSearch'),
+  );
+  clearSearchButton.hidden = true;
+  searchControl.append(search, clearSearchButton);
   const propertyList = element('div');
   const warning = element('div', 'zb-warning zb-line');
   const filterWarning = element('span', 'zb-line');
@@ -341,7 +446,16 @@ export function mountWorkspace(
   status.hidden = true;
   const retry = button(t('retry'), () => refresh());
   retry.hidden = true;
-  toolbar.append(scopeSlot, columnDetails, filterDetails, groupDetails, propertyDetails, retry);
+  toolbar.append(
+    scopeSlot,
+    columnDetails,
+    filterDetails,
+    groupDetails,
+    propertyDetails,
+    density,
+    retry,
+    searchControl,
+  );
   const bulkBar = element('section', 'zb-bulk zb-line');
   named(bulkBar, t('bulkEdit'));
   bulkBar.hidden = true;
@@ -362,6 +476,92 @@ export function mountWorkspace(
   panel.append(toolbar, warning, bulkBar, status, tableWrap, pagination);
   surface.append(top, panel, tagValues);
   root.append(style, surface);
+  syncDensity();
+  search.addEventListener('compositionstart', () => {
+    composingSearch = true;
+    window?.clearTimeout(searchTimer);
+  });
+  search.addEventListener('compositionend', () => {
+    composingSearch = false;
+    queueSearch();
+  });
+  search.addEventListener('input', queueSearch);
+  root.addEventListener('keydown', workspaceKeys);
+  surface.addEventListener('pointerdown', (event) => {
+    if (viewActions.open && !viewActions.contains(event.target as Node)) viewActions.open = false;
+  });
+
+  function queueSearch(): void {
+    clearSearchButton.hidden = !search.value;
+    if (composingSearch) return;
+    window?.clearTimeout(searchTimer);
+    if (window) searchTimer = window.setTimeout(applySearch, SEARCH_DELAY);
+    else applySearch();
+  }
+
+  function applySearch(): void {
+    const term = search.value.trim();
+    if (term === searchTerm) return;
+    searchTerm = term;
+    page = 0;
+    evaluate();
+    tableWrap.scrollTop = 0;
+  }
+
+  function clearSearch(): void {
+    window?.clearTimeout(searchTimer);
+    search.value = '';
+    clearSearchButton.hidden = true;
+    applySearch();
+  }
+
+  function workspaceKeys(event: KeyboardEvent): void {
+    if (
+      event.defaultPrevented ||
+      event.isComposing ||
+      composingSearch ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.repeat
+    )
+      return;
+    const target = event.target as Element | null;
+    if (event.key === 'Escape' && viewActions.open && viewActions.contains(target)) {
+      event.preventDefault();
+      viewActions.open = false;
+      viewActionsTrigger.focus();
+      return;
+    }
+    if (
+      target !== search &&
+      target?.closest('input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor')
+    )
+      return;
+    if (event.key === '/' && target !== search) {
+      event.preventDefault();
+      search.focus();
+    } else if (event.key === 'Escape' && search.value) {
+      event.preventDefault();
+      clearSearch();
+    }
+  }
+
+  function syncDensity(): void {
+    const current = activeView().density ?? 'compact';
+    density.value = current;
+    surface.dataset.density = current;
+    fitPills();
+  }
+
+  function fitPills(): void {
+    if (!window || fitFrame !== undefined) return;
+    fitFrame = window.requestAnimationFrame(() => {
+      fitFrame = undefined;
+      const table = tableWrap.querySelector('table');
+      if (table) cells.fitPills(table);
+    });
+  }
 
   function activeView(): View {
     return preferences.views.find((view) => view.id === preferences.active)!;
@@ -418,6 +618,8 @@ export function mountWorkspace(
     const changedSort = !same(previousView.sort, view.sort);
     const changedFilters = !same(previousView.filters, view.filters);
     const changedGrouping = !same(previousView.group, view.group);
+    const changedDensity = previousView.density !== view.density;
+    const changedWidths = !same(previousView.columnWidths, view.columnWidths);
     if (changedActive || changedScope || changedGrouping) choosingGroupTag = false;
     if (
       changedActive ||
@@ -430,7 +632,12 @@ export function mountWorkspace(
       foldedGroups.clear();
     }
     if (changedActive || changedScope || changedFilters) clearSelection();
-    if (changedActive) stopViewRename();
+    if (changedActive) {
+      stopViewRename();
+      viewActions.open = false;
+    }
+    if (changedActive || changedDensity) syncDensity();
+    if (changedActive || changedWidths) updateTableWidths();
     if (changedViews) renderTabs();
     if (changedScope || changedActive) renderScope();
     if (changedProperties) {
@@ -555,7 +762,7 @@ export function mountWorkspace(
       if (renameViewId !== view.id) return;
       stopViewRename();
       if (value?.trim() && value.trim() !== name) updateView({ name: value.trim() });
-      if (refocus) renameViewButton.focus();
+      if (refocus) viewActionsTrigger.focus();
     });
     field.focus();
     field.select();
@@ -1389,7 +1596,7 @@ export function mountWorkspace(
   function evaluate(): void {
     const view = activeView();
     result = catalog
-      ? queryCatalog(catalog, view, preferences.properties, options.language)
+      ? queryCatalog(catalog, view, preferences.properties, options.language, searchTerm)
       : undefined;
     groups =
       result && view.group && catalog
@@ -1437,16 +1644,23 @@ export function mountWorkspace(
     const columns = view.columns.filter(
       (column) => !column.startsWith('property:') || propertyFor(column),
     );
-    pagination.hidden = !items || !columns.length || total === 0;
+    pagination.hidden = !items || !columns.length || (!total && !searchTerm);
     previous.disabled = page === 0;
     next.disabled = end >= entries;
-    count.textContent = folded
+    const pageCount = folded
       ? zh
         ? `第 ${offset + 1}–${end} 个可见条目或分组／共 ${entries} 个（${total} 条资料）`
         : `${offset + 1}–${end} of ${entries} visible rows or groups · ${total} items`
       : zh
         ? `第 ${offset + 1}–${end} 条／共 ${total} 条`
         : `${offset + 1}–${end} of ${total} items`;
+    count.textContent = searchTerm
+      ? `${total ? `${pageCount} · ` : ''}${
+          zh
+            ? `匹配 ${total}／共 ${catalog?.rows.length ?? 0} 条`
+            : `${total} matches / ${catalog?.rows.length ?? 0} items`
+        }`
+      : pageCount;
 
     preserveFocus(tableWrap, () => {
       if (!items || !columns.length) {
@@ -1458,6 +1672,10 @@ export function mountWorkspace(
       }
       const table = element('table');
       table.setAttribute('aria-label', t('table'));
+      const colgroup = element('colgroup');
+      const selectionColumn = element('col');
+      selectionColumn.style.width = `${SELECT_COLUMN_WIDTH}px`;
+      colgroup.append(selectionColumn);
       const header = element('thead');
       const titles = element('tr');
       const selectCell = element('th', 'zb-select-cell');
@@ -1478,6 +1696,9 @@ export function mountWorkspace(
       selectCell.append(all);
       titles.append(selectCell);
       for (const column of columns) {
+        const col = element('col');
+        col.dataset.column = column;
+        colgroup.append(col);
         const heading = element('th');
         heading.scope = 'col';
         const sorted = column === view.sort.column;
@@ -1500,6 +1721,7 @@ export function mountWorkspace(
         );
         focusKey(sort, `header:${column}`);
         heading.append(sort);
+        heading.append(resizeGrip(table, col, column, caption));
         titles.append(heading);
       }
       header.append(titles);
@@ -1525,7 +1747,8 @@ export function mountWorkspace(
         for (let index = offset; index < end; index++)
           body.append(renderRow(items[index]!, columns));
       }
-      table.append(header, body);
+      table.append(colgroup, header, body);
+      updateTableWidths(table);
       tableWrap.replaceChildren(table);
       if (!total) {
         const empty = element('div', 'zb-empty', t('noItems'));
@@ -1534,6 +1757,104 @@ export function mountWorkspace(
       }
     });
     syncSelection();
+    fitPills();
+  }
+
+  function updateTableWidths(table = tableWrap.querySelector('table')): void {
+    if (!table) return;
+    const view = activeView();
+    let total = SELECT_COLUMN_WIDTH;
+    const headers = table.tHead?.rows[0]?.cells;
+    const columns = table.querySelectorAll<HTMLTableColElement>('col[data-column]');
+    for (let index = 0; index < columns.length; index++) {
+      const col = columns[index]!;
+      const width = columnWidth(view, col.dataset.column as Column);
+      col.style.width = `${width}px`;
+      headers?.[index + 1]?.lastElementChild?.setAttribute('aria-valuenow', String(width));
+      total += width;
+    }
+    table.style.width = `${total}px`;
+    fitPills();
+  }
+
+  function resizeGrip(
+    table: HTMLTableElement,
+    col: HTMLTableColElement,
+    column: Column,
+    caption: string,
+  ): HTMLElement {
+    const grip = element('span', 'zb-column-grip');
+    grip.tabIndex = 0;
+    grip.setAttribute('role', 'separator');
+    grip.setAttribute('aria-orientation', 'vertical');
+    grip.setAttribute('aria-valuemin', String(MIN_COLUMN_WIDTH));
+    grip.setAttribute('aria-valuemax', String(MAX_COLUMN_WIDTH));
+    named(grip, scopedName(t('resizeColumn'), caption));
+    focusKey(grip, `resize:${column}`);
+    let drag:
+      | { id: number; view: string; x: number; width: number; total: number; sign: number }
+      | undefined;
+    const bound = (width: number) =>
+      Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, Math.round(width)));
+    const commit = (width: number) => {
+      if (!tableWrap.contains(table)) return;
+      const view = activeView();
+      if (width === columnWidth(view, column)) return;
+      const widths = { ...view.columnWidths };
+      if (width === defaultColumnWidth(column)) delete widths[column];
+      else widths[column] = width;
+      updateView({ columnWidths: Object.keys(widths).length ? widths : undefined });
+    };
+    grip.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || drag) return;
+      grip.focus();
+      grip.setPointerCapture?.(event.pointerId);
+      drag = {
+        id: event.pointerId,
+        view: activeView().id,
+        x: event.clientX,
+        width: parseFloat(col.style.width),
+        total: parseFloat(table.style.width),
+        sign: window?.getComputedStyle(table).direction === 'rtl' ? -1 : 1,
+      };
+      grip.dataset.dragging = '';
+      event.preventDefault();
+    });
+    grip.addEventListener('pointermove', (event) => {
+      if (event.pointerId !== drag?.id) return;
+      const width = bound(drag.width + (event.clientX - drag.x) * drag.sign);
+      if (parseFloat(col.style.width) === width) return;
+      col.style.width = `${width}px`;
+      table.style.width = `${drag.total + width - drag.width}px`;
+      grip.setAttribute('aria-valuenow', String(width));
+      fitPills();
+    });
+    const end = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const initial = drag;
+      drag = undefined;
+      delete grip.dataset.dragging;
+      if (!tableWrap.contains(table)) return;
+      if (event.type === 'pointerup' && activeView().id === initial.view) {
+        commit(bound(initial.width + (event.clientX - initial.x) * initial.sign));
+      }
+      updateTableWidths(table);
+    };
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+    grip.addEventListener('lostpointercapture', end);
+    grip.addEventListener('dblclick', () => commit(defaultColumnWidth(column)));
+    grip.addEventListener('keydown', (event) => {
+      const width = columnWidth(activeView(), column);
+      const amount = event.shiftKey ? 32 : 8;
+      const direction = window?.getComputedStyle(table).direction === 'rtl' ? -1 : 1;
+      if (event.key === 'ArrowLeft') commit(bound(width - amount * direction));
+      else if (event.key === 'ArrowRight') commit(bound(width + amount * direction));
+      else if (event.key === 'Home') commit(defaultColumnWidth(column));
+      else return;
+      event.preventDefault();
+    });
+    return grip;
   }
 
   function renderGroupHeader(
@@ -1549,7 +1870,9 @@ export function mountWorkspace(
         ? t('missingGroup')
         : tag
           ? `${t(value ? 'withTag' : 'withoutTag')}: ${tag}`
-          : valueText(value);
+          : typeof value === 'boolean'
+            ? t(value ? 'yes' : 'no')
+            : value;
     const line = element('tr', 'zb-group');
     const heading = element('td');
     heading.colSpan = colspan;
@@ -1600,73 +1923,16 @@ export function mountWorkspace(
     check.addEventListener('click', (event) => selectItem(row.id, check.checked, event.shiftKey));
     selectCell.append(check);
     line.append(selectCell);
-    for (const column of columns) line.append(renderCell(row, column));
+    for (const column of columns)
+      line.append(
+        cells.render(
+          row,
+          column,
+          propertyFor(column),
+          cellValue(row, column, preferences.properties),
+        ),
+      );
     return line;
-  }
-
-  function valueText(value: PropertyValue): string {
-    if (typeof value === 'boolean') return value ? t('yes') : t('no');
-    if (typeof value === 'string') return value || '—';
-    return value?.length ? value.join('; ') : '—';
-  }
-
-  function renderCell(row: Row, column: Column): HTMLTableCellElement {
-    const cell = element('td');
-    cell.dataset.column = column;
-    const rowName = row.title || t('untitled');
-    const focusId = `cell:${row.id}:${column}`;
-    if (column === 'title') {
-      const title = button(rowName, () => openRow(row, false), 'zb-cell-button zb-item-title');
-      title.title = t('locate');
-      focusKey(title, focusId);
-      cell.append(title);
-      return cell;
-    }
-    const value = cellValue(row, column, preferences.properties);
-    const property = propertyFor(column);
-    if (!property && column !== 'tags') {
-      cell.textContent = valueText(value);
-      return cell;
-    }
-    if (!row.writable) {
-      cell.textContent = valueText(value);
-      cell.title = t('readOnly');
-      return cell;
-    }
-    const label = scopedName(t('edit'), `${columnName(column)} · ${rowName}`);
-    if (property?.type === 'checkbox') {
-      const check = input(label);
-      check.type = 'checkbox';
-      check.checked = value === true;
-      focusKey(check, focusId);
-      check.addEventListener('change', () => {
-        saveCell(host.setProperty(row.id, property.key, check.checked ? true : null));
-      });
-      check.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        check.click();
-      });
-      cell.append(check);
-      return cell;
-    }
-    const edit = button(
-      valueText(value),
-      () => {
-        if (column === 'tags') {
-          editTags(row, cell, edit);
-        } else if (property && isSelectProperty(property.type)) {
-          editChoices(row, property, value, cell, edit);
-        } else if (property) {
-          editScalar(row, property, typeof value === 'string' ? value : '', cell, edit);
-        }
-      },
-      'zb-cell-button',
-      `${label}: ${valueText(value)}`,
-    );
-    focusKey(edit, focusId);
-    cell.append(edit);
-    return cell;
   }
 
   function beginEditor(
@@ -1945,6 +2211,9 @@ export function mountWorkspace(
     disposed = true;
     unsubscribe();
     disposeSync?.();
+    root.removeEventListener('keydown', workspaceKeys);
+    window?.clearTimeout(searchTimer);
+    if (fitFrame !== undefined) window?.cancelAnimationFrame(fitFrame);
     for (const [region, listener] of pendingRenders)
       region.removeEventListener('focusout', listener);
     pendingRenders.clear();

@@ -202,7 +202,7 @@ function get<T extends HTMLElement>(root: ParentNode, selector: string): T {
 
 function click(root: ParentNode, caption: string): void {
   const found = [...root.querySelectorAll<HTMLButtonElement>('button')].find(
-    (element) => element.textContent === caption,
+    (element) => element.getAttribute('aria-label') === caption || element.textContent === caption,
   );
   if (!found) throw new Error(`Missing button: ${caption}`);
   found.click();
@@ -227,7 +227,7 @@ function key(element: HTMLElement, name: string): void {
 
 function openDetails(root: ParentNode, title: string): void {
   const summary = [...root.querySelectorAll<HTMLElement>('summary')].find(
-    (node) => node.textContent === title,
+    (node) => (node.getAttribute('aria-label') ?? node.textContent) === title,
   );
   if (!summary) throw new Error(`Missing section ${title}`);
   summary.click();
@@ -308,19 +308,106 @@ describe('Zotero Bases workspace', () => {
     field.blur();
     await settle();
 
+    openDetails(root, 'View actions');
     click(root, 'Copy view');
     expect(active(host)).toMatchObject({ name: 'New view (copy)', scope: 'group' });
     expect(active(host).id).not.toBe(created.id);
     expect(active(host).filters[0]?.value).toBe('Alpha 1');
+    openDetails(root, 'View actions');
     click(root, 'Rename view');
     const name = get<HTMLInputElement>(root, 'input[aria-label="View name"]');
     name.value = 'Reading list';
     key(name, 'Enter');
     expect(active(host).name).toBe('Reading list');
+    openDetails(root, 'View actions');
     click(root, 'Delete view');
     expect(active(host).id).toBe(created.id);
     click(root, 'Library');
     expect(active(host).id).toBe('default');
+  });
+
+  it('searches all pages and combines the result with saved filters and grouping', async () => {
+    vi.useFakeTimers();
+    try {
+      const rows = Array.from({ length: 65 }, (_, index) => ({
+        ...sample,
+        id: index + 1,
+        title: `Study ${index + 1}`,
+        year: index === 63 ? '2025' : '2026',
+        creators:
+          index >= 63
+            ? `${Array.from({ length: 19 }, (_, i) => `Collaborator ${i + 1}`).join('; ')}; Hidden Author`
+            : sample.creators,
+      }));
+      const { host } = fixture(rows, {
+        ...defaultView,
+        columns: ['title', 'creators'],
+        filters: [{ column: 'year', operator: 'equals', value: '2026' }],
+        group: { column: 'year', direction: 'asc' },
+      });
+      const { root } = attach(host);
+      await settle();
+      expect(rowIds(root)).toHaveLength(50);
+      expect(rowIds(root)).not.toContain(65);
+      click(root, 'Next page');
+      expect(rowIds(root)).toContain(65);
+      expect(cell(root, 'creators', 65).textContent).not.toContain('Hidden Author');
+      const search = get<HTMLInputElement>(root, '[role=searchbox]');
+      key(root, '/');
+      expect(document.activeElement).toBe(search);
+      type(search, 'Hidden Author');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(rowIds(root)).toEqual([65]);
+      expect(groupTitles(root)).toEqual(['2026 (1)']);
+      expect(get(root, '.zb-page-count').textContent).toContain('1 matches / 65 items');
+      expect(get<HTMLButtonElement>(root, '.zb-pagination button').disabled).toBe(true);
+
+      type(search, 'not present');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(rowIds(root)).toEqual([]);
+      expect(get(root, '.zb-page-count').textContent).toContain('0 matches / 65 items');
+      key(search, 'Escape');
+      expect(rowIds(root)).toHaveLength(50);
+      expect(rowIds(root)).not.toContain(65);
+      expect(active(host).filters).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('adjusts column width without sorting, restores it on remount and resets on double click', async () => {
+    const { host } = fixture();
+    const { root, teardown } = attach(host);
+    await settle();
+    changeSelection(root, 'Row density', 'comfortable');
+    const gripSelector = '[role=separator][aria-label=\"Resize column · Title\"]';
+    const grip = get(root, gripSelector);
+    const pointer = (type: string, clientX: number) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      grip.dispatchEvent(event);
+    };
+    const width = () => Number(grip.getAttribute('aria-valuenow'));
+    const start = width();
+    pointer('pointerdown', 200);
+    pointer('pointermove', 285);
+    expect(width()).toBe(start + 85);
+    expect(active(host).columnWidths).toBeUndefined();
+    pointer('pointerup', 285);
+    expect(active(host).columnWidths?.title).toBe(start + 85);
+    expect(active(host).sort).toEqual(defaultView.sort);
+    teardown();
+
+    const remount = attach(host).root;
+    await settle();
+    const restored = get(remount, gripSelector);
+    expect(restored.getAttribute('aria-valuenow')).toBe(String(start + 85));
+    expect(get<HTMLSelectElement>(remount, '[aria-label=\"Row density\"]').value).toBe(
+      'comfortable',
+    );
+    restored.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(restored.getAttribute('aria-valuenow')).toBe(String(start));
+    expect(active(host).columnWidths?.title).toBeUndefined();
   });
 
   it('keeps valid results and removes all unavailable conditions with one action', async () => {
@@ -721,6 +808,7 @@ describe('Zotero Bases workspace', () => {
     get<HTMLButtonElement>(root, 'button[aria-label="Sort by · Title"]').click();
     expect(rowSelection(root, 2).checked).toBe(true);
 
+    openDetails(root, 'View actions');
     click(root, 'Copy view');
     expect(bulk.hidden).toBe(true);
     rowSelection(root, 2).click();

@@ -48,6 +48,79 @@ describe('Zotero Bases configuration', () => {
     expect(createConfig(prefs, () => 'user', validateProperty).settings()).toEqual(first);
   });
 
+  it('restores legacy views without adding presentation fields', () => {
+    const { prefs, raw } = preferences();
+    raw.set(VIEWS_PREF, JSON.stringify({ views: [secondView], active: secondView.id }));
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    expect(config.settings()).toEqual({
+      properties: [],
+      views: [secondView],
+      active: secondView.id,
+    });
+    config.writeViews({ views: config.settings().views, active: secondView.id });
+    expect(JSON.parse(raw.get(VIEWS_PREF)!)).toEqual({
+      views: [secondView],
+      active: secondView.id,
+    });
+    expect(decodeSyncSnapshot({ schema: [], views: [secondView] }, validateProperty)).toEqual({
+      schema: [],
+      views: [secondView],
+    });
+  });
+
+  it('persists and syncs presentation settings including widths for removed properties', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const presented: View = {
+      ...secondView,
+      density: 'wrap',
+      columnWidths: { title: 48, 'property:Removed': 1600 },
+    };
+    config.writeViews({ views: [presented], active: presented.id });
+    expect(JSON.parse(raw.get(VIEWS_PREF)!)).toEqual({
+      views: [presented],
+      active: presented.id,
+    });
+    const reread = createConfig(prefs, () => 'all', validateProperty).settings();
+    expect(reread.views).toEqual([presented]);
+    const remote = decodeSyncSnapshot(
+      JSON.parse(JSON.stringify({ schema: reread.properties, views: reread.views })),
+      validateProperty,
+    );
+    expect(remote).toEqual({ schema: [], views: [presented] });
+    const target = createConfig(preferences().prefs, () => 'user', validateProperty);
+    target.applySync(remote!);
+    expect(target.settings()).toEqual({ properties: [], views: [presented], active: presented.id });
+  });
+
+  it('ignores malformed local presentation but rejects it in sync snapshots', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const malformed = [
+      { density: 'spacious', columnWidths: { title: 100 } },
+      { density: 'comfortable', columnWidths: { title: 47 } },
+      { columnWidths: { title: 1601 } },
+      { columnWidths: { unknown: 100 } },
+      { columnWidths: { title: '100' } },
+      { columnWidths: null },
+    ];
+    for (const presentation of malformed) {
+      const saved = { ...secondView, ...presentation };
+      raw.set(VIEWS_PREF, JSON.stringify({ views: [saved], active: saved.id }));
+      const restored = config.settings().views[0]!;
+      expect(restored.id).toBe(secondView.id);
+      expect(restored.columns).toEqual(secondView.columns);
+      expect(restored.filters).toEqual(secondView.filters);
+      expect(restored.density).toBe(
+        presentation.density === 'comfortable' ? 'comfortable' : undefined,
+      );
+      expect(restored.columnWidths).toEqual(
+        presentation.density === 'spacious' ? { title: 100 } : undefined,
+      );
+      expect(decodeSyncSnapshot({ schema: [], views: [saved] }, validateProperty)).toBeUndefined();
+    }
+  });
+
   it('writes only the independent versioned JSON keys and preserves stale filters for workspace warnings', () => {
     const { prefs, raw } = preferences();
     const config = createConfig(prefs, () => 'user', validateProperty);
