@@ -184,6 +184,46 @@ describe('private Bases sync', () => {
     expect(sync.status().kind).toBe('ready');
   });
 
+  it('stops scheduled and observed sync while disabled, retaining the rollback and location', async () => {
+    const { store, transport } = library();
+    const original = snapshot('Local');
+    const owner = profile(transport, original);
+    const sync = owner.start();
+    await sync.enable();
+    const remote = store.add(snapshot('Cloud edit'), [store.files[0]!.id]);
+    await sync.syncNow();
+    await sync.resolve('cloud');
+    const location = { title: 'Bases settings', collection: 'READING' };
+    await sync.rename(location);
+    owner.state.update(snapshot('Draft'));
+    store.changed();
+    expect(sync.status()).toMatchObject({ kind: 'pending', canRestore: true });
+
+    await sync.disable();
+    expect(sync.status()).toMatchObject({ kind: 'off', canRestore: false });
+    const reads = store.reads;
+    const refreshes = store.refreshes;
+    owner.state.update(snapshot('Edited while off'));
+    store.changed();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE * 2);
+    await sync.syncNow();
+    expect(store.reads).toBe(reads);
+    expect(store.refreshes).toBe(refreshes);
+    expect(store.files).toHaveLength(2);
+
+    sync.stop();
+    const restarted = owner.start();
+    expect(restarted.status()).toMatchObject({ kind: 'off', location });
+    await restarted.enable();
+    expect(restarted.status()).toMatchObject({ kind: 'ready', canRestore: true });
+    expect(JSON.parse(store.files[2]!.text)).toMatchObject({
+      parents: [remote],
+      snapshot: snapshot('Edited while off'),
+    });
+    await restarted.restore();
+    expect(owner.state.value).toEqual(original);
+  });
+
   it('needs an explicit cloud pull, persists the rollback and restores it without hidden local loss', async () => {
     const { store, transport } = library();
     const owner = profile(transport, snapshot('On this device'));

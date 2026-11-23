@@ -1,7 +1,9 @@
 import type { Column, NativeColumn, Property, PropertyType, PropertyValue, Row } from './contracts';
+import type { GlobalPreferences } from './global-preferences';
 
 export interface CellActions {
   open(row: Row, pdf: boolean): void;
+  authorFormat?: () => GlobalPreferences['authorFormat'];
   toggle(row: Row, property: Property, checked: boolean): void;
   edit(
     row: Row,
@@ -237,7 +239,9 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       const full = row.creators;
       const first = full.indexOf('; ');
       cell.textContent =
-        first !== -1 && full.indexOf('; ', first + 2) !== -1
+        actions.authorFormat?.() !== 'singleLine' &&
+        first !== -1 &&
+        full.indexOf('; ', first + 2) !== -1
           ? `${full.slice(0, first)} et al.`
           : valueText(full);
       cell.title = full;

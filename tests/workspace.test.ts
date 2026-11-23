@@ -18,6 +18,11 @@ import type {
 } from '../src/contracts';
 import { createPropertyValidation } from '../src/data';
 import { writeProperty } from '../src/extra';
+import {
+  DEFAULT_GLOBAL_PREFERENCES,
+  type GlobalPreferenceStore,
+  type GlobalPreferences,
+} from '../src/global-preferences';
 import { mountWorkspace } from '../src/workspace';
 
 const properties: readonly Property[] = [
@@ -441,6 +446,64 @@ describe('Zotero Bases workspace', () => {
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('updates both surfaces without losing search, and disables only grid shortcuts', async () => {
+    let current = DEFAULT_GLOBAL_PREFERENCES;
+    const subscribers = new Set<(value: GlobalPreferences) => void>();
+    const global: GlobalPreferenceStore = {
+      read: () => current,
+      set(key, value) {
+        current = { ...current, [key]: value };
+        for (const listener of subscribers) listener(current);
+      },
+      subscribe(listener) {
+        subscribers.add(listener);
+        return () => {
+          subscribers.delete(listener);
+        };
+      },
+    };
+    const creators = 'Ada Lovelace; Grace Hopper; Mary Jackson';
+    const rows = [sample, { ...sample, id: 2, title: 'Beta', creators }];
+    const view: View = { ...defaultView, columns: ['title', 'creators'] };
+    const main = attach(fixture(rows, view).host, { language: 'en', global, popOut: () => {} });
+    const floating = attach(fixture(rows, view).host, { language: 'en', global });
+    await settle();
+    expect(cell(main.root, 'creators', 2).textContent).toBe('Ada Lovelace et al.');
+    global.set('authorFormat', 'singleLine');
+    for (const { root } of [main, floating]) {
+      expect(cell(root, 'creators', 2).textContent).toBe(creators);
+      expect(cell(root, 'creators', 2).title).toBe(creators);
+    }
+    vi.useFakeTimers();
+    try {
+      const search = get<HTMLInputElement>(main.root, '[role=searchbox]');
+      search.focus();
+      type(search, 'Mary Jackson');
+      await vi.advanceTimersByTimeAsync(300);
+      global.set('language', 'zh-CN');
+      expect(rowIds(main.root)).toEqual([2]);
+      expect(rowIds(floating.root)).toEqual([1, 2]);
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('在当前范围内搜索');
+      expect(get<HTMLInputElement>(main.root, '[role=searchbox]').value).toBe('Mary Jackson');
+      expect(get(floating.root, '[role=searchbox]').getAttribute('aria-label')).toBe(
+        '在当前范围内搜索',
+      );
+
+      const second = cell(floating.root, 'title', 2);
+      second.focus();
+      global.set('keyboardFlow', false);
+      expect(key(second, 'k')).toBe(true);
+      expect(key(second, 'x')).toBe(true);
+      expect(document.activeElement).toBe(second);
+      expect(rowSelection(floating.root, 2).checked).toBe(false);
+      global.set('keyboardFlow', true);
+      expect(key(second, 'x')).toBe(false);
+      expect(rowSelection(floating.root, 2).checked).toBe(true);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

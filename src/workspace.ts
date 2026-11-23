@@ -20,10 +20,18 @@ import {
   type WorkspaceHost,
 } from './contracts';
 import { createCellRenderers } from './cell-renderers';
+import { scopeCustomCSS } from './custom-css';
+import {
+  DEFAULT_GLOBAL_PREFERENCES,
+  resolveLanguage,
+  type GlobalPreferences,
+  type GlobalPreferenceStore,
+} from './global-preferences';
 import { groupRows, isGroupProperty, type RowGroup } from './grouping';
+import { messages, type Language } from './i18n';
 import { cellValue, filterOperators, queryCatalog, type QueryResult } from './query';
 import type { SyncPort } from './sync';
-import { mountSyncControls } from './sync-controls';
+import { mountSyncBadge } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
 import { TableKeys, type TableCommand } from './table-keys';
 import { flattenRows, VirtualLayout, type VirtualRow } from './virtual-layout';
@@ -72,6 +80,7 @@ const words = {
   viewName: ['View name', '视图名称'],
   copySuffix: ['copy', '副本'],
   popOut: ['Open in new window', '在新窗口打开'],
+  settings: ['Zotero Bases settings', 'Zotero Bases 设置'],
   scope: ['Scope', '范围'],
   allLibraries: ['All libraries', '全部文库'],
   columns: ['Columns', '列'],
@@ -202,33 +211,90 @@ function named(element: HTMLElement, label: string): void {
   element.title = label;
 }
 
+interface WorkspaceOptions {
+  language: Language;
+  popOut?: () => void;
+  sync?: SyncPort;
+  global?: GlobalPreferenceStore;
+  openPreferences?: () => void;
+}
+
+type ActiveCell = { key: string; column: Column };
+
+interface WorkspaceState {
+  viewID: string;
+  scope: string;
+  catalog?: Catalog;
+  search: string;
+  selected: Set<number>;
+  selectionAnchor?: number;
+  foldedGroups: Set<RowGroup['value']>;
+  activeCell?: ActiveCell;
+  scroll: { key?: string; offset: number; left: number };
+  focus?: 'search' | 'grid';
+}
+
 export function mountWorkspace(
   root: HTMLElement,
   host: WorkspaceHost,
-  options: { language: 'zh-CN' | 'en'; popOut?: () => void; sync?: SyncPort },
+  options: WorkspaceOptions,
 ): () => void {
+  const preferences = options.global;
+  let globals = preferences?.read() ?? DEFAULT_GLOBAL_PREFERENCES;
+  let language = resolveLanguage(globals.language, options.language);
+  let surface = mountWorkspaceSurface(root, host, { ...options, language }, globals);
+  const unsubscribe = preferences?.subscribe((next) => {
+    globals = next;
+    const locale = resolveLanguage(next.language, options.language);
+    if (locale === language) {
+      surface.applyGlobals(next);
+      return;
+    }
+    const state = surface.snapshot();
+    surface.dispose();
+    language = locale;
+    surface = mountWorkspaceSurface(root, host, { ...options, language }, globals, state);
+  });
+  return () => {
+    unsubscribe?.();
+    surface.dispose();
+  };
+}
+
+function mountWorkspaceSurface(
+  root: HTMLElement,
+  host: WorkspaceHost,
+  options: WorkspaceOptions,
+  globals: GlobalPreferences,
+  state?: WorkspaceState,
+) {
   const doc = root.ownerDocument;
   const window = doc.defaultView;
   const narrowWindow = options.popOut ? undefined : window?.matchMedia?.('(max-width: 72rem)');
   const zh = options.language === 'zh-CN';
-  const t = (key: keyof typeof words): string => words[key][zh ? 1 : 0];
+  const t = messages(words, options.language);
   const mountId = `zb-${++nextId}`;
   let preferences = host.settings();
+  const savedView = preferences.views.find((view) => view.id === preferences.active);
+  const restored =
+    state && state.viewID === savedView?.id && state.scope === savedView.scope ? state : undefined;
+  let initialScroll = restored?.scroll;
   let pendingViews = 0;
   let disposed = false;
   let loadTicket = 0;
-  let catalog: Catalog | undefined;
-  let loadedScope: string | undefined;
+  let catalog = restored?.catalog;
+  let loadedScope = restored?.scope;
   let result: QueryResult | undefined;
   let groups: readonly RowGroup[] | undefined;
-  const foldedGroups = new Set<RowGroup['value']>();
+  const foldedGroups = restored?.foldedGroups ?? new Set<RowGroup['value']>();
   let choosingGroupTag = false;
-  const selected = new Set<number>();
-  let selectionAnchor: number | undefined;
+  const selected = restored?.selected ?? new Set<number>();
+  let selectionAnchor = restored?.selectionAnchor;
   let bulkPending = false;
   const layout = new VirtualLayout();
   const tableKeys = new TableKeys();
   let entries: readonly VirtualRow[] = [];
+  const mounted = new Map<string, HTMLTableRowElement>();
   let tableBody:
     | {
         body: HTMLTableSectionElement;
@@ -237,13 +303,12 @@ export function mountWorkspace(
         columns: readonly Column[];
       }
     | undefined;
-  const mounted = new Map<string, HTMLTableRowElement>();
-  let activeCell: { key: string; column: Column } | undefined;
+  let activeCell = restored?.activeCell;
   let paintedCell: HTMLTableCellElement | undefined;
   let restoreGridFocus = false;
   let virtualFrame: number | undefined;
   let resetMeasurements = false;
-  let searchTerm = '';
+  let searchTerm = restored?.search.trim() ?? '';
   let searchTimer: number | undefined;
   let composingSearch = false;
   let fitFrame: number | undefined;
@@ -256,6 +321,7 @@ export function mountWorkspace(
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
     text: t,
+    authorFormat: () => globals.authorFormat,
     columnName,
     open: openRow,
     toggle(row, property, checked) {
@@ -381,6 +447,7 @@ export function mountWorkspace(
 
   const style = element('style');
   style.textContent = workspaceCSS;
+  const customStyle = element('style');
   const surface = element('section', 'zb-workspace');
   surface.lang = options.language;
   const top = element('div', 'zb-bar zb-top');
@@ -417,11 +484,14 @@ export function mountWorkspace(
   );
   viewControls.append(tabs, addViewButton, viewActions, renameSlot);
   top.append(viewControls);
+  const disposeSync =
+    options.sync && options.openPreferences
+      ? mountSyncBadge(top, options.sync, options.language, options.openPreferences)
+      : undefined;
   if (options.popOut)
     top.append(button('↗', options.popOut, 'zb-popout zb-tool-icon', t('popOut')));
-  const disposeSync = options.sync
-    ? mountSyncControls(top, options.sync, options.language)
-    : undefined;
+  if (options.openPreferences)
+    top.append(button('⚙', options.openPreferences, 'zb-settings zb-tool-icon', t('settings')));
   const panel = element('div', 'zb-panel');
   panel.id = `${mountId}-panel`;
   panel.setAttribute('role', 'tabpanel');
@@ -455,8 +525,9 @@ export function mountWorkspace(
   searchToggle.hidden = true;
   searchToggle.setAttribute('aria-controls', searchField.id);
   searchToggle.setAttribute('aria-expanded', 'false');
+  searchToggle.toggleAttribute('data-filtering', !!searchTerm);
   searchToggle.setAttribute('aria-keyshortcuts', '/');
-  const search = input(t('search'));
+  const search = input(t('search'), restored?.search);
   search.setAttribute('role', 'searchbox');
   search.setAttribute('aria-keyshortcuts', '/');
   search.placeholder = `${t('search')}  /`;
@@ -469,7 +540,7 @@ export function mountWorkspace(
     'zb-tool-icon',
     t('clearSearch'),
   );
-  clearSearchButton.hidden = true;
+  clearSearchButton.hidden = !search.value;
   searchField.append(search, clearSearchButton);
   top.append(searchToggle);
   const propertyList = element('div');
@@ -519,10 +590,12 @@ export function mountWorkspace(
   tagValues.id = `${mountId}-filter-tags`;
   const count = element('span');
   count.setAttribute('aria-live', 'polite');
-  tableStatus.append(count, element('span', 'zb-table-keys', t('keyboardHint')));
+  const keyHints = element('span', 'zb-table-keys', t('keyboardHint'));
+  tableStatus.append(count, keyHints);
   panel.append(toolbar, warning, bulkBar, status, tableWrap, tableStatus);
   surface.append(top, panel, tagValues);
-  root.append(style, surface);
+  root.append(style, customStyle, surface);
+  updateAppearance();
   syncSearchMode();
   narrowWindow?.addEventListener('change', syncSearchMode);
   syncDensity();
@@ -587,6 +660,35 @@ export function mountWorkspace(
     if (searchToggle.hidden || searchField.hidden) return;
     setSearchExpanded(false);
     if (restore) searchToggle.focus({ preventScroll: true });
+  }
+
+  function updateAppearance(): void {
+    surface.dataset.appearance = globals.appearance;
+    surface.dataset.authorFormat = globals.authorFormat;
+    keyHints.hidden = !globals.showShortcuts || !globals.keyboardFlow;
+    customStyle.textContent = globals.customCSS ? scopeCustomCSS(globals.customCSS, doc) : '';
+  }
+
+  function applyGlobals(next: GlobalPreferences): void {
+    const previous = globals;
+    globals = next;
+    if (previous.keyboardFlow !== next.keyboardFlow) tableKeys.reset();
+    if (
+      previous.showShortcuts !== next.showShortcuts ||
+      previous.keyboardFlow !== next.keyboardFlow
+    )
+      keyHints.hidden = !next.showShortcuts || !next.keyboardFlow;
+    if (previous.appearance !== next.appearance) surface.dataset.appearance = next.appearance;
+    if (previous.customCSS !== next.customCSS)
+      customStyle.textContent = next.customCSS ? scopeCustomCSS(next.customCSS, doc) : '';
+    if (previous.authorFormat !== next.authorFormat) {
+      surface.dataset.authorFormat = next.authorFormat;
+      recycleEditor?.();
+      resetMeasurements = true;
+      renderTable();
+    } else if (previous.appearance !== next.appearance || previous.customCSS !== next.customCSS) {
+      widthGeometryChanged();
+    }
   }
 
   function queueSearch(): void {
@@ -877,6 +979,7 @@ export function mountWorkspace(
           columns: NATIVE_COLUMNS,
           sort: { column: 'title', direction: 'asc' },
           filters: [],
+          density: globals.defaultDensity,
         };
     saveViews([...preferences.views, view], id);
   }
@@ -1899,7 +2002,14 @@ export function mountWorkspace(
         tableWrap.append(empty);
       }
     });
-    renderWindow(resetScroll ? 0 : top < 0 ? tableWrap.scrollTop : layout.offset(top) + distance);
+    if (initialScroll && items) {
+      const restoredTop = initialScroll.key ? layout.indexOf(initialScroll.key) : -1;
+      tableWrap.scrollLeft = initialScroll.left;
+      renderWindow(restoredTop < 0 ? 0 : layout.offset(restoredTop) + initialScroll.offset);
+      initialScroll = undefined;
+    } else {
+      renderWindow(resetScroll ? 0 : top < 0 ? tableWrap.scrollTop : layout.offset(top) + distance);
+    }
     syncSelection();
   }
 
@@ -2121,6 +2231,7 @@ export function mountWorkspace(
 
   function gridKeys(event: KeyboardEvent, target: Element): void {
     if (
+      !globals.keyboardFlow ||
       event.defaultPrevented ||
       (target !== tableWrap && !target.closest('tbody tr[data-row-key]')) ||
       target.closest('.zb-editor')
@@ -2700,9 +2811,12 @@ export function mountWorkspace(
       refresh();
     }
   });
-  refresh();
+  if (restored?.focus === 'search') focusSearch();
+  else if (restored?.focus === 'grid') tableWrap.focus({ preventScroll: true });
+  if (catalog) evaluate();
+  else refresh();
 
-  return () => {
+  function dispose(): void {
     if (disposed) return;
     disposed = true;
     unsubscribe();
@@ -2718,5 +2832,31 @@ export function mountWorkspace(
     pendingRenders.clear();
     surface.remove();
     style.remove();
-  };
+    customStyle.remove();
+  }
+
+  function snapshot(): WorkspaceState {
+    const focused = doc.activeElement;
+    const focus = ownsSearch(focused) ? 'search' : tableWrap.contains(focused) ? 'grid' : undefined;
+    recycleEditor?.();
+    const top = layout.indexAt(tableWrap.scrollTop);
+    return {
+      viewID: activeView().id,
+      scope: activeView().scope,
+      catalog,
+      search: search.value,
+      selected,
+      selectionAnchor,
+      foldedGroups,
+      activeCell,
+      scroll: {
+        key: entries[top]?.key,
+        offset: tableWrap.scrollTop - layout.offset(top),
+        left: tableWrap.scrollLeft,
+      },
+      focus,
+    };
+  }
+
+  return { dispose, applyGlobals, snapshot };
 }

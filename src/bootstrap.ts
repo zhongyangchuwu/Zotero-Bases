@@ -1,3 +1,4 @@
+import { createConfigurationBackup } from './backup';
 import { createConfig, decodeSyncSnapshot, SCHEMA_PREF, VIEWS_PREF } from './config';
 import type { WorkspaceHost } from './contracts';
 import {
@@ -7,6 +8,13 @@ import {
   type Prefs,
   type ZoteroData,
 } from './data';
+import {
+  createGlobalPreferenceStore,
+  resolveLanguage,
+  type GlobalPreferenceStore,
+} from './global-preferences';
+import { publishLaunchAPI, type BasesAPIHost, type LaunchRegistration } from './launch';
+import { mountPreferences } from './preferences';
 import { createSyncController, type SyncPort } from './sync';
 import {
   createNativeSyncTransport,
@@ -20,6 +28,8 @@ const NAME = 'Zotero Bases';
 const TAB_TYPE = 'zoterobases';
 const POPUP_URI = 'chrome://zotero-bases/content/window.xhtml';
 const HTML = 'http://www.w3.org/1999/xhtml';
+const PANE_ID = 'zotero-bases-prefs';
+const PANE_MOUNT = Symbol.for('zotero-bases.mount-preference-pane');
 const NATIVE_COLORS = [
   ['background', '--color-background'],
   ['surface', '--material-sidepane'],
@@ -52,6 +62,7 @@ interface WindowObserver {
 }
 interface Popup {
   window: Window;
+  ready: Promise<void>;
   detach: () => void;
 }
 interface NativeTab {
@@ -69,10 +80,25 @@ interface Session {
 }
 
 declare const Zotero: ZoteroData &
-  NativeSyncZotero & {
+  NativeSyncZotero &
+  BasesAPIHost & {
     readonly Prefs: Prefs;
     readonly initializationPromise: Promise<unknown>;
     readonly locale: string;
+    getMainWindow(): Window | null;
+    readonly PreferencePanes: {
+      register(options: {
+        pluginID: string;
+        id: string;
+        src: string;
+        label: string;
+      }): Promise<string>;
+      unregister(id: string): void;
+    };
+    readonly Utilities: ZoteroData['Utilities'] & {
+      Internal: ZoteroData['Utilities']['Internal'] & { openPreferences(id: string): void };
+    };
+    [PANE_MOUNT]?: (root: HTMLElement) => void;
     readonly MenuManager: {
       registerMenu(options: {
         menuID: string;
@@ -114,9 +140,47 @@ const sessions = new Map<Window, Session>();
 let registration: { destruct(): void } | undefined;
 let menu: string | undefined;
 let librarySync: (SyncPort & { stop(): void }) | undefined;
+let launch: LaunchRegistration | undefined;
+let paneID: string | undefined;
+let paneRegistration = Promise.resolve();
+let globalStore: GlobalPreferenceStore | undefined;
+const preferenceMounts = new Map<HTMLElement, () => void>();
 
-function startLibrarySync(): void {
-  if (librarySync) return;
+function globalPreferences() {
+  return (globalStore ??= createGlobalPreferenceStore(Zotero.Prefs));
+}
+
+function openPreferences(): void {
+  void paneRegistration
+    .then(() => {
+      if (paneID) Zotero.Utilities.Internal.openPreferences(paneID);
+    })
+    .catch((error) => Zotero.logError(error));
+}
+
+function mountPreferencePane(root: HTMLElement): void {
+  if (!registration || preferenceMounts.has(root)) return;
+  guarded(() => {
+    const sync = startLibrarySync();
+    const { validate } = createPropertyValidation(Zotero);
+    const unmount = mountPreferences(root, {
+      store: globalPreferences(),
+      hostLocale: () => Zotero.locale,
+      sync,
+      backup: createConfigurationBackup(Zotero.Prefs, validate),
+    });
+    const dispose = () => {
+      preferenceMounts.delete(root);
+      root.removeEventListener('unload', dispose);
+      unmount();
+    };
+    preferenceMounts.set(root, dispose);
+    root.addEventListener('unload', dispose);
+  });
+}
+
+function startLibrarySync(): SyncPort & { stop(): void } {
+  if (librarySync) return librarySync;
   const prefs = Zotero.Prefs;
   const { validate } = createPropertyValidation(Zotero);
   const config = createConfig(prefs, () => 'user', validate, { initializeDefault: false });
@@ -143,10 +207,11 @@ function startLibrarySync(): void {
     },
     logError: (error) => Zotero.logError(error),
   });
+  return librarySync;
 }
 
 function language(): 'zh-CN' | 'en' {
-  return /^zh-(?:CN|Hans)(?:-|$)/i.test(Zotero.locale) ? 'zh-CN' : 'en';
+  return resolveLanguage('auto', Zotero.locale);
 }
 
 function guarded(action: () => void): void {
@@ -191,7 +256,8 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   const root = parent.ownerDocument.createElementNS(HTML, 'div') as HTMLElement;
   root.dataset.zoteroBases = '';
   root.tabIndex = -1;
-  root.style.cssText = 'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;';
+  root.style.cssText =
+    'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;contain:paint style;';
   parent.append(root);
   const media = session.owner.matchMedia('(prefers-color-scheme: dark)');
   const update = () => {
@@ -207,6 +273,8 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
       language: language(),
       popOut,
       sync: librarySync,
+      global: globalPreferences(),
+      openPreferences,
     });
     media.addEventListener('change', update);
     return {
@@ -223,10 +291,10 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   }
 }
 
-function openPopup(session: Session): void {
+async function openPopup(session: Session): Promise<void> {
   if (session.popup && !session.popup.window.closed) {
     session.popup.window.focus();
-    return;
+    return session.popup.ready;
   }
   const window = Services.ww.openWindow(
     session.owner,
@@ -237,8 +305,15 @@ function openPopup(session: Session): void {
   );
   let dispose: (() => void) | undefined;
   let observing = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
   const entry: Popup = {
     window,
+    ready,
     detach: () => {
       if (session.popup === entry) session.popup = undefined;
       if (observing) {
@@ -248,6 +323,7 @@ function openPopup(session: Session): void {
       window.removeEventListener('DOMContentLoaded', mount);
       dispose?.();
       dispose = undefined;
+      rejectReady(new Error('The Zotero Bases window closed before it finished opening'));
     },
   };
   function mount(): void {
@@ -262,10 +338,11 @@ function openPopup(session: Session): void {
       if (tab) session.tabs.close(tab.id);
       window.focus();
       root.focus();
+      resolveReady();
     } catch (error) {
+      rejectReady(error);
       guarded(entry.detach);
       guarded(() => window.close());
-      Zotero.logError(error);
     }
   }
   const observer: WindowObserver = {
@@ -280,17 +357,18 @@ function openPopup(session: Session): void {
     window.addEventListener('DOMContentLoaded', mount);
     mount();
   } catch (error) {
+    rejectReady(error);
     guarded(entry.detach);
     guarded(() => window.close());
-    throw error;
   }
+  return ready;
 }
 
 function openTab(owner: Window): void {
-  if (!menu || owner.closed) return;
+  if (!menu || owner.closed) throw new Error('Cannot open Zotero Bases in this window');
   const session = sessionFor(owner);
-  if (!session) return;
-  guarded(startLibrarySync);
+  if (!session) throw new Error('Cannot open Zotero Bases in this window');
+  startLibrarySync();
   if (session.tab) {
     session.tabs.select(session.tab.id);
     session.tab.root.focus();
@@ -307,16 +385,50 @@ function openTab(owner: Window): void {
     },
   });
   try {
-    const { root, dispose } = mountSurface(session, container, () =>
-      guarded(() => openPopup(session)),
+    const { root, dispose } = mountSurface(
+      session,
+      container,
+      () => void openPopup(session).catch((error) => Zotero.logError(error)),
     );
     session.tab = { id, root, dispose };
+    owner.focus();
     session.tabs.select(id);
     root.focus();
   } catch (error) {
     guarded(() => session.tabs.close(id));
     throw error;
   }
+}
+
+function focusSession(session: Session): true | Promise<void> | undefined {
+  if (session.owner.closed) return;
+  if (session.popup && !session.popup.window.closed) {
+    session.popup.window.focus();
+    return session.popup.ready;
+  }
+  if (!session.tab) return;
+  session.owner.focus();
+  session.tabs.select(session.tab.id);
+  session.tab.root.focus();
+  return true;
+}
+
+function focusExisting(owner?: Window): true | Promise<void> | undefined {
+  const preferred = owner && sessions.get(owner);
+  const focused = preferred && focusSession(preferred);
+  if (focused) return focused;
+  for (const session of sessions.values()) {
+    if (session === preferred) continue;
+    const focused = focusSession(session);
+    if (focused) return focused;
+  }
+  return undefined;
+}
+
+function isMain(window: Window | null | undefined): window is Main {
+  return (
+    !!window && !window.closed && typeof (window as Partial<Main>).Zotero_Tabs?.add === 'function'
+  );
 }
 
 function closeSession(owner: Window, nativeClose: boolean): void {
@@ -356,13 +468,8 @@ export function startup({ id, rootURI }: RootData): void {
           onShowing: (_, { menuElem }) => menuElem.setAttribute('label', NAME),
           onCommand: (_, { menuElem }) => {
             const owner = menuElem.ownerDocument.defaultView;
-            if (owner)
-              void Zotero.initializationPromise
-                .then(() => {
-                  if (registration !== registered || owner.closed) return;
-                  guarded(() => openTab(owner));
-                })
-                .catch((error) => Zotero.logError(error));
+            if (owner && registration === registered)
+              void launch?.api.open({ window: owner }).catch((error) => Zotero.logError(error));
           },
         },
       ],
@@ -370,6 +477,39 @@ export function startup({ id, rootURI }: RootData): void {
     if (!menuID) throw new Error('Zotero refused the Bases Tools menu');
     menu = menuID;
     registration = registered;
+    Zotero[PANE_MOUNT] = mountPreferencePane;
+    launch = publishLaunchAPI(Zotero, {
+      ready: Zotero.initializationPromise,
+      focusExisting,
+      resolveOwner: (requested) => {
+        const owner = isMain(requested) ? requested : Zotero.getMainWindow();
+        return isMain(owner) ? owner : null;
+      },
+      defaultMode: () => globalPreferences().read().openMode,
+      open(owner, mode) {
+        if (mode === 'tab') {
+          openTab(owner);
+          return;
+        }
+        const session = sessionFor(owner);
+        if (!session) throw new Error('Cannot open Zotero Bases in this window');
+        startLibrarySync();
+        return openPopup(session);
+      },
+    });
+    paneRegistration = paneRegistration
+      .then(async () => {
+        if (registration !== registered) return;
+        const pane = await Zotero.PreferencePanes.register({
+          id: PANE_ID,
+          pluginID: id,
+          src: `${rootURI}content/preferences.xhtml`,
+          label: NAME,
+        });
+        if (registration === registered) paneID = pane;
+        else Zotero.PreferencePanes.unregister(pane);
+      })
+      .catch((error) => Zotero.logError(error));
     void Zotero.initializationPromise
       .then(() => {
         if (registration === registered) guarded(startLibrarySync);
@@ -386,6 +526,14 @@ export function onMainWindowUnload({ window }: { window: Window }): void {
 }
 
 export function shutdown(): void {
+  launch?.dispose();
+  launch = undefined;
+  if (Zotero[PANE_MOUNT] === mountPreferencePane) delete Zotero[PANE_MOUNT];
+  for (const dispose of preferenceMounts.values()) guarded(dispose);
+  const pane = paneID;
+  paneID = undefined;
+  if (pane) guarded(() => Zotero.PreferencePanes.unregister(pane));
+  globalStore = undefined;
   const previous = menu;
   menu = undefined;
   if (previous) guarded(() => void Zotero.MenuManager.unregisterMenu(previous));
