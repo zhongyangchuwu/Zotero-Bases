@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Catalog, Column, Filter, Property, Row, View } from '../src/contracts';
 import { groupRows } from '../src/grouping';
-import { cellValue, filterOperators, queryCatalog } from '../src/query';
+import { cellValue, dateDay, filterOperators, queryCatalog } from '../src/query';
 
 const properties: readonly Property[] = [
   { key: 'Memo', type: 'text' },
@@ -82,11 +82,18 @@ describe('cells and filter forms', () => {
       creators: 'L. Smith',
       tags: ['survey'],
       pdf: true,
+      citationKey: 'Smith2024',
+      collections: ['Methods', 'Reading'],
+      notesCount: '0',
       extra: 'Memo: first: review\nConfidence: +.500\nStatus: Reading\nMethod: Diffusion; Retired',
     });
     expect(cellValue(record, 'creators', properties)).toBe('L. Smith');
     expect(cellValue(record, 'tags', properties)).toEqual(['survey']);
     expect(cellValue(record, 'pdf', properties)).toBe(true);
+    expect(cellValue(record, 'citationKey', properties)).toBe('Smith2024');
+    expect(cellValue(record, 'collections', properties)).toEqual(['Methods', 'Reading']);
+    expect(cellValue(record, 'notesCount', properties)).toBe('0');
+    expect(cellValue(record, 'doi', properties)).toBeNull();
     expect(cellValue(record, 'property:Memo', properties)).toBe('first: review');
     expect(cellValue(record, 'property:Confidence', properties)).toBe('+.500');
     expect(cellValue(record, 'property:Reviewed', properties)).toBe(false);
@@ -100,18 +107,32 @@ describe('cells and filter forms', () => {
     expect(filterOperators('property:Memo', properties)).toEqual(
       filterOperators('title', properties),
     );
-    expect(filterOperators('year', properties)).toEqual(['equals', 'gte', 'lte', 'has', 'missing']);
-    expect(filterOperators('property:Confidence', properties)).toEqual(
-      filterOperators('year', properties),
-    );
+    const nativeNumbers = ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'has', 'missing'];
+    for (const column of ['year', 'notesCount', 'attachmentsCount'] as const) {
+      expect(filterOperators(column, properties)).toEqual(nativeNumbers);
+    }
+    expect(filterOperators('property:Confidence', properties)).toEqual([
+      'equals',
+      'gte',
+      'lte',
+      'has',
+      'missing',
+    ]);
     expect(filterOperators('property:Status', properties)).toEqual(['equals', 'has', 'missing']);
     expect(filterOperators('property:Reviewed', properties)).toEqual(
       filterOperators('pdf', properties),
     );
-    expect(filterOperators('tags', properties)).toEqual(['contains', 'has', 'missing']);
-    expect(filterOperators('property:Method', properties)).toEqual(
-      filterOperators('tags', properties),
-    );
+    for (const column of ['tags', 'collections'] as const) {
+      expect(filterOperators(column, properties)).toEqual([
+        'contains',
+        'notContains',
+        'has',
+        'missing',
+      ]);
+    }
+    expect(filterOperators('property:Method', properties)).toEqual(['contains', 'has', 'missing']);
+    expect(filterOperators('doi', properties)).toEqual(filterOperators('title', properties));
+    expect(filterOperators('url', properties)).toEqual(filterOperators('title', properties));
     expect(filterOperators('added', properties)).toEqual([
       'equals',
       'before',
@@ -221,6 +242,47 @@ describe('catalog filtering', () => {
     expect(queryCatalog(catalog, after, properties, 'en-US').rows.map(({ id }) => id)).toEqual([3]);
   });
 
+  it('uses source calendar days and does not guess missing or impossible days', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { date: '2024-02-29 February 29th, 2024' }),
+        row(2, { date: '2024-02-29T23:59:00-02:00' }),
+        row(3, { date: '2024-03-01 00:00:00' }),
+        row(4, { date: '2024-02-00 February 2024' }),
+        row(5, { date: '2024-02-30' }),
+        row(6, { date: '2024-03-01 08:70:00' }),
+        row(7, { date: '2024-02' }),
+        row(8, { date: '02/29/2024' }),
+        row(9),
+      ],
+      tags: new Set(),
+    };
+    for (const [operator, value, ids] of [
+      ['equals', '2024-02-29', [1, 2]],
+      ['before', '2024-03-01', [1, 2]],
+      ['after', '2024-02-29', [3]],
+      ['has', '', [1, 2, 3, 4, 5, 6, 7, 8]],
+      ['missing', '', [9]],
+    ] as const) {
+      const result = queryCatalog(
+        items,
+        view([{ column: 'date', operator, value }]),
+        properties,
+        'en',
+      );
+      expect(result.invalid).toEqual([]);
+      expect(result.rows.map(({ id }) => id)).toEqual(ids);
+    }
+    const invalid = view([
+      { column: 'date', operator: 'equals', value: '2024-02' },
+      { column: 'date', operator: 'before', value: '2024-02-29T00:00:00Z' },
+    ]);
+    expect(queryCatalog(items, invalid, properties, 'en').invalid).toEqual([0, 1]);
+    expect(dateDay('2024-02-29T23:59:00-02:00')).toBe('2024-02-29');
+    expect(dateDay('1900-02-29')).toBeUndefined();
+    expect(dateDay('2000-02-29')).toBe('2000-02-29');
+  });
+
   it('compares decimal filters exactly, including beyond safe integer precision', () => {
     const numbers: Catalog = {
       rows: [
@@ -241,6 +303,101 @@ describe('catalog filtering', () => {
     expect(queryCatalog(numbers, between, properties, 'en-US').rows.map(({ id }) => id)).toEqual([
       2,
     ]);
+  });
+
+  it('compares native counts strictly and distinguishes zero from an unset cell', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { notesCount: '0', attachmentsCount: '10' }),
+        row(2, { notesCount: '2', attachmentsCount: '2' }),
+        row(3, { notesCount: '10', attachmentsCount: '0' }),
+        row(4),
+      ],
+      tags: new Set(),
+    };
+    for (const [operator, value, ids] of [
+      ['equals', '0', [1]],
+      ['notEquals', '2', [1, 3]],
+      ['gt', '2', [3]],
+      ['gte', '2', [2, 3]],
+      ['lt', '2', [1]],
+      ['lte', '2', [1, 2]],
+      ['has', '', [1, 2, 3]],
+      ['missing', '', [4]],
+    ] as const) {
+      const result = queryCatalog(
+        items,
+        view([{ column: 'notesCount', operator, value }]),
+        properties,
+        'en',
+      );
+      expect(result.invalid).toEqual([]);
+      expect(result.rows.map(({ id }) => id)).toEqual(ids);
+    }
+    const result = queryCatalog(
+      items,
+      view([
+        { column: 'attachmentsCount', operator: 'lte', value: '2' },
+        { column: 'attachmentsCount', operator: 'gt', value: '2x' },
+        { column: 'property:Confidence', operator: 'lt', value: '3' },
+      ]),
+      properties,
+      'en',
+    );
+    expect(result.invalid).toEqual([1, 2]);
+    expect(result.rows.map(({ id }) => id)).toEqual([2, 3]);
+  });
+
+  it('filters collection members and nonmembers by exact catalog names', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { collections: ['Reading List', 'Methods'] }),
+        row(2, { collections: ['Reading'] }),
+        row(3, { collections: [] }),
+        row(4),
+      ],
+      tags: new Set(['Tag only']),
+      collections: new Set(['Reading List', 'Methods', 'Reading', 'Elsewhere']),
+    };
+    for (const [operator, value, ids] of [
+      ['contains', 'Reading List', [1]],
+      ['contains', 'Reading', [2]],
+      ['contains', 'Elsewhere', []],
+      ['notContains', 'Reading List', [2, 3, 4]],
+      ['has', '', [1, 2]],
+      ['missing', '', [3, 4]],
+    ] as const) {
+      const result = queryCatalog(
+        items,
+        view([{ column: 'collections', operator, value }]),
+        properties,
+        'en',
+      );
+      expect(result.invalid).toEqual([]);
+      expect(result.rows.map(({ id }) => id)).toEqual(ids);
+    }
+    const invalid = view([
+      { column: 'collections', operator: 'contains', value: 'reading list' },
+      { column: 'collections', operator: 'notContains', value: 'Tag only' },
+      { column: 'collections', operator: 'contains', value: '' },
+    ]);
+    expect(queryCatalog(items, invalid, properties, 'en').invalid).toEqual([0, 1, 2]);
+  });
+
+  it('filters links as text without needing them to be visible', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { doi: '10.1000/DOI', url: 'https://example.org/article' }),
+        row(2, { doi: '10.1001/DOI' }),
+        row(3, { doi: '10.1000/DOI' }),
+      ],
+      tags: new Set(),
+    };
+    const filtered = view([
+      { column: 'doi', operator: 'equals', value: '10.1000/doi' },
+      { column: 'url', operator: 'contains', value: 'EXAMPLE.ORG' },
+    ]);
+    expect(queryCatalog(items, filtered, properties, 'en').rows.map(({ id }) => id)).toEqual([1]);
   });
 });
 
@@ -299,6 +456,46 @@ describe('catalog search', () => {
     expect(
       queryCatalog(items, view(), properties, 'en-US', ' \t\n ').rows.map(({ id }) => id),
     ).toEqual([1, 2]);
+  });
+
+  it('searches flagged native fields when hidden and other native fields when visible', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, {
+          title: 'Research',
+          citationKey: 'Smith2024',
+          doi: '10.1000/Sample',
+          journalAbbreviation: 'Nat. Phys.',
+          publisher: 'Science Press',
+          collections: ['Methods', 'Reading List'],
+          pages: '115–120',
+          url: 'https://example.org',
+          pdf: true,
+        }),
+        row(2, { title: 'Research', collections: ['Methods'], pages: '128', pdf: false }),
+      ],
+      tags: new Set(),
+    };
+    for (const term of ['smith2024', '10.1000/sample', 'phys.', 'press', 'reading']) {
+      expect(queryCatalog(items, view(), properties, 'en', term).rows.map(({ id }) => id)).toEqual([
+        1,
+      ]);
+    }
+    const visible: View = { ...view(), columns: ['title', 'citationKey', 'pages', 'url', 'pdf'] };
+    for (const term of ['115–120', 'example.org', 'yes']) {
+      expect(queryCatalog(items, view(), properties, 'en', term).rows).toEqual([]);
+      expect(queryCatalog(items, visible, properties, 'en', term).rows.map(({ id }) => id)).toEqual(
+        [1],
+      );
+    }
+    const result = queryCatalog(
+      items,
+      visible,
+      properties,
+      'en',
+      'research smith2024 methods 115–120',
+    );
+    expect(result.rows.map(({ id }) => id)).toEqual([1]);
   });
 
   it('searches only visible custom values, including individual options and localized checkboxes', () => {
@@ -402,6 +599,42 @@ describe('catalog sorting', () => {
       4, 2, 3, 6, 5, 1,
     ]);
     expect(queryCatalog(items, { ...sorted, sorts: [] }, properties, 'en').rows).toBe(items.rows);
+  });
+
+  it('combines chronological native dates and numeric counts with stable ties and blanks last', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { dateModified: '2024-04-01T23:00:00+03:00', notesCount: '2' }),
+        row(2, { dateModified: '2024-04-01 20:00:00', notesCount: '10' }),
+        row(3, { dateModified: '2024-04-01T21:00:00-03:00', notesCount: '0' }),
+        row(4, { dateModified: '2024-04-01T20:00:00Z', notesCount: '2' }),
+        row(5, { dateModified: '2024-04', notesCount: '0' }),
+        row(6, { notesCount: '10' }),
+        row(7, { dateModified: '2024-04-01T20:00:00.001Z' }),
+        row(8, { dateModified: '2024-04-01T20:00:00Z' }),
+      ],
+      tags: new Set(),
+    };
+    const descending: View = {
+      ...view(),
+      sorts: [
+        { column: 'dateModified', direction: 'desc' },
+        { column: 'notesCount', direction: 'desc' },
+      ],
+    };
+    expect(queryCatalog(items, descending, properties, 'en').rows.map(({ id }) => id)).toEqual([
+      3, 7, 2, 1, 4, 8, 6, 5,
+    ]);
+    const ascending: View = {
+      ...descending,
+      sorts: [
+        { column: 'dateModified', direction: 'asc' },
+        { column: 'notesCount', direction: 'asc' },
+      ],
+    };
+    expect(queryCatalog(items, ascending, properties, 'en').rows.map(({ id }) => id)).toEqual([
+      1, 4, 2, 8, 7, 3, 5, 6,
+    ]);
   });
 
   it('uses three keys, keeps blanks last independently, and preserves order within groups', () => {

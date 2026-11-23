@@ -16,14 +16,19 @@ const view: View = {
   id: 'reading',
   name: 'Reading',
   scope: 'user',
-  columns: ['title', 'property:Reading Stage'],
+  columns: ['title', 'doi', 'collections', 'notesCount', 'property:Reading Stage'],
   sorts: [
     { column: 'property:Reading Stage', direction: 'desc' },
     { column: 'title', direction: 'asc' },
   ],
-  filters: [{ column: 'property:Reading Stage', operator: 'equals', value: 'Unread' }],
+  filters: [
+    { column: 'property:Reading Stage', operator: 'equals', value: 'Unread' },
+    { column: 'collections', operator: 'notContains', value: 'Archive' },
+    { column: 'notesCount', operator: 'gt', value: '0' },
+  ],
+  group: { column: 'collections', collection: 'Reading', direction: 'asc' },
   density: 'wrap',
-  columnWidths: { title: 320 },
+  columnWidths: { title: 320, doi: 240, collections: 200 },
 };
 
 describe('configuration backup', () => {
@@ -101,6 +106,42 @@ describe('configuration backup', () => {
     expect(JSON.parse(backup.exportJSON())).toEqual({
       schema: [],
       views: [{ ...fields, sorts: [sort] }],
+    });
+  });
+
+  it('imports legacy unknown native columns without losing valid settings', () => {
+    const { prefs } = preferences();
+    const backup = createConfigurationBackup(prefs, validateProperty);
+    const legacy = {
+      ...view,
+      columns: ['futureColumn', 'title', 'property:Reading Stage'],
+      sorts: [
+        { column: 'futureColumn', direction: 'asc' },
+        { column: 'title', direction: 'desc' },
+      ],
+      filters: [
+        { column: 'futureColumn', operator: 'equals', value: 'x' },
+        { column: 'property:Reading Stage', operator: 'equals', value: 'Unread' },
+      ],
+      group: { column: 'futureColumn', direction: 'asc' },
+      columnWidths: { futureColumn: 80, title: 320 },
+    };
+    expect(backup.importJSON(JSON.stringify({ schema: [property], views: [legacy] }))).toEqual({
+      properties: 1,
+      views: 1,
+    });
+    const { group: _group, ...ungrouped } = view;
+    expect(JSON.parse(backup.exportJSON())).toEqual({
+      schema: [property],
+      views: [
+        {
+          ...ungrouped,
+          columns: ['title', 'property:Reading Stage'],
+          sorts: [{ column: 'title', direction: 'desc' }],
+          filters: [{ column: 'property:Reading Stage', operator: 'equals', value: 'Unread' }],
+          columnWidths: { title: 320 },
+        },
+      ],
     });
   });
 

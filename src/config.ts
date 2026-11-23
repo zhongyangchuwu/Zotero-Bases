@@ -1,4 +1,10 @@
-import { MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, NATIVE_COLUMNS } from './contracts';
+import {
+  DEFAULT_COLUMNS,
+  isNativeColumn,
+  MAX_COLUMN_WIDTH,
+  MIN_COLUMN_WIDTH,
+  NATIVE_COLUMN_BY_KEY,
+} from './contracts';
 import type {
   Column,
   ConfigChange,
@@ -38,6 +44,10 @@ const propertyTypes: Record<PropertyType, true> = {
 const operators: readonly string[] = [
   'contains',
   'equals',
+  'notContains',
+  'notEquals',
+  'gt',
+  'lt',
   'gte',
   'lte',
   'has',
@@ -59,55 +69,76 @@ function parse(raw: unknown): unknown {
   }
 }
 
-function column(value: unknown): value is Column {
-  return (
-    typeof value === 'string' &&
-    (NATIVE_COLUMNS.some((name) => name === value) || /^property:.+/u.test(value))
-  );
+function columnName(value: unknown): value is string {
+  return typeof value === 'string' && !!value && value !== 'property:';
 }
 
-function filter(value: unknown): value is Filter {
+function column(value: unknown): value is Column {
+  return columnName(value) && (isNativeColumn(value) || /^property:.+/u.test(value));
+}
+
+function validFilter(value: unknown): boolean {
   return (
     object(value) &&
-    column(value.column) &&
+    columnName(value.column) &&
     typeof value.operator === 'string' &&
     operators.includes(value.operator) &&
     typeof value.value === 'string'
   );
 }
 
+function filter(value: unknown): value is Filter {
+  return validFilter(value) && object(value) && column(value.column);
+}
+
+function validGrouping(value: unknown): boolean {
+  if (!object(value) || !columnName(value.column) || !isDirection(value.direction)) return false;
+  if (value.column === 'tags') return typeof value.tag === 'string' && !!value.tag.trim();
+  if (value.column === 'collections')
+    return typeof value.collection === 'string' && !!value.collection.trim();
+  if (isNativeColumn(value.column)) {
+    const kind = NATIVE_COLUMN_BY_KEY[value.column].grouping;
+    return !!kind && kind !== 'member';
+  }
+  return true;
+}
+
 function grouping(value: unknown): Grouping | undefined {
-  if (!object(value) || !isDirection(value.direction)) return undefined;
-  const { column, direction } = value;
-  if (column === 'tags')
-    return typeof value.tag === 'string' && value.tag.trim()
-      ? { column, tag: value.tag, direction }
-      : undefined;
-  if (column === 'year' || column === 'type') return { column, direction };
-  if (typeof column === 'string' && /^property:.+/u.test(column))
-    return { column: column as `property:${string}`, direction };
-  return undefined;
+  if (
+    !validGrouping(value) ||
+    !object(value) ||
+    !column(value.column) ||
+    !isDirection(value.direction)
+  )
+    return undefined;
+  const { column: key, direction } = value;
+  if (key === 'tags') return { column: key, tag: value.tag as string, direction };
+  if (key === 'collections')
+    return { column: key, collection: value.collection as string, direction };
+  return { column: key, direction } as Grouping;
 }
 
 function isDirection(value: unknown): value is Grouping['direction'] {
   return value === 'asc' || value === 'desc';
 }
 
-function validSort(value: unknown): value is SortRule {
-  return object(value) && column(value.column) && isDirection(value.direction);
+function validSort(value: unknown): value is { column: string; direction: Grouping['direction'] } {
+  return object(value) && columnName(value.column) && isDirection(value.direction);
 }
 
 function sortRules(value: Record<string, unknown>): SortRule[] {
   // Sort migration is permissive even in otherwise strict portable snapshots.
   if (!Object.hasOwn(value, 'sorts')) {
     const { sort } = value;
-    return validSort(sort) ? [{ column: sort.column, direction: sort.direction }] : [];
+    return validSort(sort) && column(sort.column)
+      ? [{ column: sort.column, direction: sort.direction }]
+      : [];
   }
   if (!Array.isArray(value.sorts)) return [];
   const sorts: SortRule[] = [];
   for (const rule of value.sorts) {
     if (!validSort(rule)) return [];
-    sorts.push({ column: rule.column, direction: rule.direction });
+    if (column(rule.column)) sorts.push({ column: rule.column, direction: rule.direction });
   }
   return sorts;
 }
@@ -116,18 +147,16 @@ function validDensity(value: unknown): value is Density {
   return value === 'compact' || value === 'comfortable' || value === 'wrap';
 }
 
-function validColumnWidths(value: unknown): value is NonNullable<View['columnWidths']> {
-  return (
-    object(value) &&
-    Object.entries(value).every(
-      ([key, width]) =>
-        column(key) &&
-        typeof width === 'number' &&
-        Number.isFinite(width) &&
-        width >= MIN_COLUMN_WIDTH &&
-        width <= MAX_COLUMN_WIDTH,
-    )
-  );
+function columnWidths(value: unknown): NonNullable<View['columnWidths']> | undefined {
+  if (!object(value)) return undefined;
+  const widths: Record<string, number> = {};
+  for (const [key, width] of Object.entries(value)) {
+    if (!columnName(key) || typeof width !== 'number' || !Number.isFinite(width)) return undefined;
+    if (!column(key)) continue;
+    if (width < MIN_COLUMN_WIDTH || width > MAX_COLUMN_WIDTH) return undefined;
+    widths[key] = width;
+  }
+  return widths;
 }
 
 function view(value: unknown, strict = false): View | undefined {
@@ -143,23 +172,27 @@ function view(value: unknown, strict = false): View | undefined {
   }
   const group = grouping(value.group);
   const density = validDensity(value.density) ? value.density : undefined;
-  const columnWidths = validColumnWidths(value.columnWidths) ? value.columnWidths : undefined;
+  const widths = columnWidths(value.columnWidths);
+  const columns = Array.isArray(value.columns) ? value.columns.filter(column) : DEFAULT_COLUMNS;
   if (
     strict &&
     (!Array.isArray(value.columns) ||
-      !value.columns.every(column) ||
+      !value.columns.every(columnName) ||
       !Array.isArray(value.filters) ||
-      !value.filters.every(filter) ||
-      (value.group !== undefined && !group) ||
+      !value.filters.every(validFilter) ||
+      (value.group !== undefined && !validGrouping(value.group)) ||
       (value.density !== undefined && !density) ||
-      (value.columnWidths !== undefined && !columnWidths))
+      (value.columnWidths !== undefined && !widths))
   )
     return undefined;
   return {
     id: value.id,
     name: value.name,
     scope: value.scope,
-    columns: Array.isArray(value.columns) ? value.columns.filter(column) : NATIVE_COLUMNS,
+    columns:
+      Array.isArray(value.columns) && value.columns.length && !columns.length
+        ? DEFAULT_COLUMNS
+        : columns,
     sorts: sortRules(value),
     filters: Array.isArray(value.filters)
       ? value.filters
@@ -168,7 +201,7 @@ function view(value: unknown, strict = false): View | undefined {
       : [],
     ...(group ? { group } : {}),
     ...(density ? { density } : {}),
-    ...(columnWidths ? { columnWidths } : {}),
+    ...(widths ? { columnWidths: widths } : {}),
   };
 }
 
@@ -245,7 +278,7 @@ export function createConfig(
         id: 'default',
         name: 'Default',
         scope: initialScope(),
-        columns: NATIVE_COLUMNS,
+        columns: DEFAULT_COLUMNS,
         sorts: [{ column: 'title', direction: 'asc' }],
         filters: [],
       });

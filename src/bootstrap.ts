@@ -86,6 +86,7 @@ declare const Zotero: ZoteroData &
     readonly initializationPromise: Promise<unknown>;
     readonly locale: string;
     getMainWindow(): Window | null;
+    launchURL(url: string): void;
     readonly PreferencePanes: {
       register(options: {
         pluginID: string;
@@ -131,8 +132,11 @@ declare const Components: {
         registerChrome(uri: object, registrations: string[][]): { destruct(): void };
       };
     };
+    '@mozilla.org/widget/clipboardhelper;1': {
+      getService(type: unknown): { copyString(text: string): void };
+    };
   };
-  interfaces: { amIAddonManagerStartup: unknown };
+  interfaces: { amIAddonManagerStartup: unknown; nsIClipboardHelper: unknown };
   utils: { cloneInto<T>(value: T, target: object): T };
 };
 
@@ -275,6 +279,16 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
       sync: librarySync,
       global: globalPreferences(),
       openPreferences,
+      linkActions: {
+        open: (url) => guarded(() => Zotero.launchURL(url)),
+        copy: (text) =>
+          guarded(() => {
+            const { classes: Cc, interfaces: Ci } = Components;
+            Cc['@mozilla.org/widget/clipboardhelper;1']
+              .getService(Ci.nsIClipboardHelper)
+              .copyString(text);
+          }),
+      },
     });
     media.addEventListener('change', update);
     return {

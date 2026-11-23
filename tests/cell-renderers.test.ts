@@ -25,23 +25,28 @@ const labels = {
   locate: 'Locate item',
   open: 'Open',
   openPDF: 'Open PDF',
+  openLink: 'Open link',
+  copyDOI: 'Copy DOI',
   readOnly: 'Read-only',
   edit: 'Edit',
   untitled: 'Untitled',
 };
 
-function fixture(doc = document) {
+function fixture(doc = document, enableLinks = true) {
   const open = vi.fn<CellActions['open']>();
   const edit = vi.fn<CellActions['edit']>();
   const toggle = vi.fn<CellActions['toggle']>();
+  const openLink = vi.fn<NonNullable<CellActions['linkActions']>['open']>();
+  const copyDOI = vi.fn<NonNullable<CellActions['linkActions']>['copy']>();
   const renderers = createCellRenderers(doc, {
     open,
+    linkActions: enableLinks ? { open: openLink, copy: copyDOI } : undefined,
     edit,
     toggle,
     columnName: (column) => column.replace('property:', ''),
     text: (key) => labels[key],
   });
-  return { ...renderers, open, edit, toggle };
+  return { ...renderers, open, edit, toggle, openLink, copyDOI };
 }
 
 function get<T extends HTMLElement>(root: ParentNode, selector: string): T {
@@ -79,6 +84,129 @@ describe('cell renderers', () => {
     const cell = render({ ...row, added }, 'added', undefined, added);
     expect(cell.textContent).toBe(display);
     expect(cell.title).toBe(added);
+  });
+
+  it.each([
+    ['dateModified', '2024-10-31 00:01:00', '2024-10-31'],
+    ['lastRead', '2024-02-29T05:12:34.000Z', '2024-02-29'],
+    ['accessDate', '2024-10-31T00:01:00+03:00', '2024-10-31'],
+    ['accessDate', '2024-10', '2024-10'],
+    ['date', '2024-03-00 March 2024', 'March 2024'],
+    ['date', '2024-00-00 2024', '2024'],
+    ['date', '2024-00-00 Spring 2024', 'Spring 2024'],
+    ['date', '0000-00-00 in press', 'in press'],
+    ['date', '2024-11-05 November 5, 2024', 'November 5, 2024'],
+    ['date', '2024-10-31 00:01:00', '2024-10-31 00:01:00'],
+  ] as const)('displays %s (%s) without losing the original date', (column, value, display) => {
+    const { render } = fixture();
+    const cell = render(row, column, undefined, value);
+    expect(cell.textContent).toBe(display);
+    expect(cell.title).toBe(value);
+  });
+
+  it('hides only zero attachment and note counts and renders citation keys as fixed-width text', () => {
+    const { render } = fixture();
+    for (const column of ['notesCount', 'attachmentsCount'] as const) {
+      const zero = render(row, column, undefined, '0');
+      expect(zero.textContent).toBe('');
+      expect(zero.classList.contains('zb-cell-number')).toBe(true);
+      const positive = render(row, column, undefined, '12');
+      expect(positive.textContent).toBe('12');
+      expect(positive.title).toBe('12');
+      expect(positive.classList.contains('zb-cell-number')).toBe(true);
+    }
+    expect(render(row, 'year', undefined, '0').textContent).toBe('0');
+    const rating: Property = { key: 'Rating', type: 'number' };
+    expect(render(row, 'property:Rating', rating, '0').textContent).toBe('0');
+    const citation = render(row, 'citationKey', undefined, 'lovelace1843notes');
+    expect(citation.classList.contains('zb-cell-monospace')).toBe(true);
+    expect(citation.textContent).toBe('lovelace1843notes');
+  });
+
+  it.each([
+    ['  DOI: 10.1234/Abc#β?  ', '10.1234/Abc#β?', 'https://doi.org/10.1234/Abc%23%CE%B2%3F'],
+    [
+      'http://dx.doi.org/10.1234/ABC%23tag?x=1#fragment',
+      '10.1234/ABC#tag',
+      'https://doi.org/10.1234/ABC%23tag',
+    ],
+  ])('opens and copies a %s DOI through separate explicit controls', (value, doi, url) => {
+    const { render, openLink, copyDOI, open } = fixture();
+    const table = document.createElement('table');
+    const line = table.insertRow();
+    const cell = render({ ...row, writable: false }, 'doi', undefined, value);
+    line.append(cell);
+    const rowDoubleClick = vi.fn();
+    line.addEventListener('dblclick', rowDoubleClick);
+    const openButton = get<HTMLButtonElement>(cell, '.zb-link-open');
+    const copyButton = get<HTMLButtonElement>(cell, '.zb-link-copy');
+
+    expect(openButton.textContent).toBe(doi);
+    expect(openButton.getAttribute('aria-label')).toBe(`Open link · ${doi}`);
+    expect(copyButton.getAttribute('aria-label')).toBe(`Copy DOI · ${doi}`);
+    expect(cell.querySelectorAll('button.zb-link-control[type=button]')).toHaveLength(2);
+    cell.click();
+    expect(openLink).not.toHaveBeenCalled();
+    expect(copyDOI).not.toHaveBeenCalled();
+    copyButton.click();
+    expect(copyDOI.mock.calls).toEqual([[doi]]);
+    expect(openLink).not.toHaveBeenCalled();
+    openButton.click();
+    expect(openLink.mock.calls).toEqual([[url]]);
+    for (const button of [openButton, copyButton])
+      button.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(rowDoubleClick).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'HTTP://Example.test/path?cite=@author#section',
+      'http://example.test/path?cite=@author#section',
+    ],
+    ['https://example.test/articles/123', 'https://example.test/articles/123'],
+  ])('opens a validated %s URL only from its distinct button', (value, url) => {
+    const { render, openLink, copyDOI } = fixture();
+    const cell = render(row, 'url', undefined, value);
+    cell.click();
+    expect(openLink).not.toHaveBeenCalled();
+    expect(cell.querySelectorAll('button')).toHaveLength(1);
+    const openButton = get<HTMLButtonElement>(cell, '.zb-link-control');
+    expect(openButton.textContent).toBe(value);
+    openButton.click();
+    expect(openLink.mock.calls).toEqual([[url]]);
+    expect(copyDOI).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['url', 'javascript:alert(1)'],
+    ['url', 'data:text/plain,unused'],
+    ['url', 'file:///tmp/article'],
+    ['url', '//example.test/article'],
+    ['url', 'https:///example.test/article'],
+    ['url', 'https://example.test:invalid/'],
+    ['url', 'https://reader:password@example.test/article'],
+    ['url', 'https://@example.test/article'],
+    ['doi', 'https://reader@doi.org/10.1234/abc'],
+    ['doi', 'https://example.test/10.1234/abc'],
+    ['doi', 'https://doi.org/10.1234/%ZZ'],
+    ['doi', '10.1234/'],
+  ] as const)('renders unsupported %s (%s) as inert text', (column, value) => {
+    const { render, openLink, copyDOI } = fixture();
+    const cell = render(row, column, undefined, value);
+    expect(cell.textContent).toBe(value);
+    expect(cell.title).toBe(value);
+    expect(cell.querySelector('a, button')).toBeNull();
+    cell.click();
+    expect(openLink).not.toHaveBeenCalled();
+    expect(copyDOI).not.toHaveBeenCalled();
+  });
+
+  it('retains links as inert text when no host supplies link actions', () => {
+    const { render } = fixture(document, false);
+    const cell = render(row, 'doi', undefined, '10.1234/abc');
+    expect(cell.textContent).toBe('10.1234/abc');
+    expect(cell.querySelector('a, button')).toBeNull();
   });
 
   it('locates titles and opens available PDFs via distinct native XHTML buttons', () => {
@@ -178,6 +306,18 @@ describe('cell renderers', () => {
     expect(custom.querySelector('path')?.getAttribute('d')).not.toBe(
       native.querySelector('path')?.getAttribute('d'),
     );
+    const icon = (column: Parameters<typeof createFieldIcon>[1]) =>
+      createFieldIcon(doc, column).querySelector('path')?.getAttribute('d');
+    expect(icon('dateModified')).toBe(icon('accessDate'));
+    expect(icon('doi')).toBe(icon('url'));
+    const distinct = [
+      'citationKey',
+      'collections',
+      'doi',
+      'notesCount',
+      'attachmentsCount',
+    ] as const;
+    expect(new Set(distinct.map(icon)).size).toBe(distinct.length);
   });
 
   it('marks numeric cells, badges item types, and passes the original edit value', () => {
@@ -336,6 +476,33 @@ describe('cell renderers', () => {
     available = 132;
     fitPills(table);
     expect(visible()).toEqual(row.tags);
+  });
+
+  it('keeps collection pills read-only with the full names available after clipping', () => {
+    const { render, fitPills } = fixture();
+    const values = ['Algorithms and Systems', 'Special Topics'];
+    const table = document.createElement('table');
+    const cell = render(row, 'collections', undefined, values);
+    table.insertRow().append(cell);
+    document.body.append(table);
+    expect(cell.querySelector('button')).toBeNull();
+    const strip = get(cell, '.zb-cell-pills');
+    const pills = Array.from(strip.querySelectorAll<HTMLElement>('.zb-cell-pill'));
+    strip.style.columnGap = '3px';
+    vi.spyOn(strip, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 68, 0));
+    pills.forEach((pill, index) => {
+      vi.spyOn(pill, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, index === 2 ? 21 : 40, 0),
+      );
+    });
+    fitPills(table);
+    expect(pills.filter((pill) => !pill.hidden).map((pill) => pill.textContent)).toEqual([
+      values[0],
+      '+1',
+    ]);
+    expect(pills.map((pill) => pill.title)).toEqual([...values, values.join('; ')]);
+    expect(strip.title).toBe(values.join('; '));
+    expect(render(row, 'collections', undefined, []).childNodes).toHaveLength(0);
   });
 
   it('renders both kinds of select values as exact pills, including in read-only rows', () => {

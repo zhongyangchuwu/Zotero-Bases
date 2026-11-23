@@ -1,21 +1,28 @@
-import type {
-  Catalog,
-  Column,
-  Filter,
-  Operator,
-  Property,
-  PropertyType,
-  PropertyValue,
-  Row,
-  View,
+import {
+  isNativeColumn,
+  NATIVE_COLUMN_BY_KEY,
+  NATIVE_COLUMN_DEFINITIONS,
+  type Catalog,
+  type Column,
+  type Filter,
+  type NativeColumn,
+  type NativeValueType,
+  type Operator,
+  type Property,
+  type PropertyType,
+  type PropertyValue,
+  type Row,
+  type View,
 } from './contracts';
 import { isDecimal, readProperty } from './extra';
 
-type Kind = PropertyType | 'tags' | 'date';
+type Kind = PropertyType | 'multi' | 'date';
+type ValueSource = NativeColumn | Property;
 
 interface ColumnInfo {
   readonly kind: Kind;
-  readonly property?: Property;
+  readonly source: ValueSource;
+  readonly operators: readonly Operator[];
 }
 
 export interface QueryResult {
@@ -29,8 +36,26 @@ const OPERATORS: Readonly<Record<Kind, readonly Operator[]>> = {
   checkbox: ['equals', 'has', 'missing'],
   'single-select': ['equals', 'has', 'missing'],
   'multi-select': ['contains', 'has', 'missing'],
-  tags: ['contains', 'has', 'missing'],
+  multi: ['contains', 'notContains', 'has', 'missing'],
   date: ['equals', 'before', 'after', 'has', 'missing'],
+};
+const NATIVE_NUMERIC_OPERATORS: readonly Operator[] = [
+  'equals',
+  'notEquals',
+  'gt',
+  'gte',
+  'lt',
+  'lte',
+  'has',
+  'missing',
+];
+const NATIVE_KINDS: Readonly<Record<NativeValueType, Kind>> = {
+  text: 'text',
+  number: 'number',
+  date: 'date',
+  link: 'text',
+  multi: 'multi',
+  boolean: 'checkbox',
 };
 
 function propertyIn(column: Column, properties: readonly Property[]): Property | undefined {
@@ -40,41 +65,18 @@ function propertyIn(column: Column, properties: readonly Property[]): Property |
 }
 
 function columnInfo(column: Column, properties: readonly Property[]): ColumnInfo | undefined {
-  switch (column) {
-    case 'title':
-    case 'creators':
-    case 'source':
-    case 'type':
-      return { kind: 'text' };
-    case 'year':
-      return { kind: 'number' };
-    case 'added':
-      return { kind: 'date' };
-    case 'pdf':
-      return { kind: 'checkbox' };
-    case 'tags':
-      return { kind: 'tags' };
-    default: {
-      const property = propertyIn(column, properties);
-      return property ? { kind: property.type, property } : undefined;
-    }
+  if (isNativeColumn(column)) {
+    const kind = NATIVE_KINDS[NATIVE_COLUMN_BY_KEY[column].valueType];
+    const operators = kind === 'number' ? NATIVE_NUMERIC_OPERATORS : OPERATORS[kind];
+    return { kind, source: column, operators };
   }
+  const property = propertyIn(column, properties);
+  return property && { kind: property.type, source: property, operators: OPERATORS[property.type] };
 }
 
-function valueIn(row: Row, column: Column, property: Property | undefined): PropertyValue {
-  switch (column) {
-    case 'title':
-    case 'creators':
-    case 'year':
-    case 'source':
-    case 'type':
-    case 'tags':
-    case 'pdf':
-    case 'added':
-      return row[column];
-    default:
-      return property ? readProperty(row.extra, property) : null;
-  }
+function valueIn(row: Row, source: ValueSource | undefined): PropertyValue {
+  if (typeof source === 'string') return row[source] ?? null;
+  return source ? readProperty(row.extra, source) : null;
 }
 
 export function cellValue(
@@ -82,15 +84,14 @@ export function cellValue(
   column: Column,
   properties: readonly Property[],
 ): PropertyValue {
-  return valueIn(row, column, propertyIn(column, properties));
+  return valueIn(row, isNativeColumn(column) ? column : propertyIn(column, properties));
 }
 
 export function filterOperators(
   column: Column,
   properties: readonly Property[],
 ): readonly Operator[] {
-  const info = columnInfo(column, properties);
-  return info ? OPERATORS[info.kind] : [];
+  return columnInfo(column, properties)?.operators ?? [];
 }
 
 interface Decimal {
@@ -124,24 +125,57 @@ function compareDecimal(left: Decimal, right: Decimal): number {
   return left.digits < right.digits ? -left.sign : left.sign;
 }
 
-function isCalendarDay(value: string): boolean {
-  if (value.length !== 10 || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const year = Number(value.slice(0, 4));
-  const month = Number(value.slice(5, 7));
-  const day = Number(value.slice(8));
-  if (year === 0 || month < 1 || month > 12 || day < 1) return false;
-  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  return day <= (month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31);
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const DATE_PARTS = /^(\d{4})-(\d{2})(?:-(\d{2})(.*))?$/;
+const DATE_TIME =
+  /^[ T]((?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?)(Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?$/i;
+const SQL_TIME_PREFIX = /^ +\d{1,2}:/;
+
+/** Normalize sortable Zotero/ISO dates without inferring a day for partial dates. */
+function normalizeDate(value: string, precision: 'month' | 'day' | 'instant'): string | undefined {
+  const text = value.trim();
+  const parts = DATE_PARTS.exec(text);
+  if (!parts) return undefined;
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  if (!year || month < 1 || month > 12) return undefined;
+
+  // A multipart date is a sortable prefix, then a space and the user's original text.
+  // A malformed SQL time is not a multipart date.
+  const suffix = parts[4] ?? '';
+  const time = suffix ? DATE_TIME.exec(suffix) : null;
+  if (suffix && !time && (!suffix.startsWith(' ') || SQL_TIME_PREFIX.test(suffix)))
+    return undefined;
+
+  const day = Number(parts[3] ?? '00');
+  if (!day) return precision === 'month' && !time ? text.slice(0, 7) : undefined;
+  const leapDay = month === 2 && year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  if (day > (leapDay ? 29 : DAYS_IN_MONTH[month - 1]!)) return undefined;
+  if (precision === 'month') return text.slice(0, 7);
+  const calendarDay = text.slice(0, 10);
+  // Zotero SQL times have no explicit offset; compare them as UTC, not machine-local time.
+  return precision === 'instant' && time
+    ? `${calendarDay}T${time[1]}${time[2]?.toUpperCase() ?? 'Z'}`
+    : calendarDay;
+}
+
+/** Day in the original calendar, even when a timestamp's offset crosses midnight in UTC. */
+export function dateDay(value: string): string | undefined {
+  return normalizeDate(value, 'day');
+}
+
+/** An explicit year and month are sufficient for month grouping, but not day comparison. */
+export function dateMonth(value: string): string | undefined {
+  return normalizeDate(value, 'month');
 }
 
 function compileFilter(
-  filter: Filter,
-  info: ColumnInfo | undefined,
-  tags: ReadonlySet<string>,
+  { operator, value }: Filter,
+  info: ColumnInfo,
+  catalog: Catalog,
   locale: string,
 ): ((value: PropertyValue) => boolean) | undefined {
-  const { operator, value } = filter;
-  if (!info || !OPERATORS[info.kind].includes(operator)) return undefined;
+  if (!info.operators.includes(operator)) return undefined;
   if (operator === 'has' || operator === 'missing') {
     if (value !== '') return undefined;
     return (actual) => {
@@ -154,12 +188,12 @@ function compileFilter(
       if (value !== 'true' && value !== 'false') return undefined;
       return (actual) => actual === (value === 'true');
     case 'date':
-      if (!isCalendarDay(value)) return undefined;
+      if (!value || dateDay(value) !== value) return undefined;
       return (actual) => {
         if (typeof actual !== 'string') return false;
-        const day = actual.slice(0, 10);
+        const day = dateDay(actual);
         return (
-          isCalendarDay(day) &&
+          day !== undefined &&
           (operator === 'equals'
             ? day === value
             : operator === 'before'
@@ -174,7 +208,21 @@ function compileFilter(
         const number = typeof actual === 'string' ? decimal(actual) : null;
         if (number === null) return false;
         const order = compareDecimal(number, target);
-        return operator === 'equals' ? order === 0 : operator === 'gte' ? order >= 0 : order <= 0;
+        switch (operator) {
+          case 'equals':
+            return order === 0;
+          case 'notEquals':
+            return order !== 0;
+          case 'gt':
+            return order > 0;
+          case 'gte':
+            return order >= 0;
+          case 'lt':
+            return order < 0;
+          case 'lte':
+            return order <= 0;
+        }
+        return false;
       };
     }
     case 'text': {
@@ -189,23 +237,32 @@ function compileFilter(
     case 'single-select':
     case 'multi-select': {
       const target = value.trim().normalize('NFC');
-      if (!info.property?.options?.includes(target)) return undefined;
+      const options = typeof info.source === 'string' ? undefined : info.source.options;
+      if (!options?.includes(target)) return undefined;
       return (actual) => actual === target || (Array.isArray(actual) && actual.includes(target));
     }
-    case 'tags':
-      if (!tags.has(value)) return undefined;
-      return (actual) => Array.isArray(actual) && actual.includes(value);
+    case 'multi': {
+      const members = info.source === 'tags' ? catalog.tags : catalog.collections;
+      if (!value || !members?.has(value)) return undefined;
+      return (actual) =>
+        (Array.isArray(actual) && actual.includes(value)) === (operator === 'contains');
+    }
   }
 }
 
-type SortKey = Decimal | string | boolean | null;
+type SortKey = Decimal | string | number | boolean | null;
 
 function sortKey(value: PropertyValue, kind: Kind): SortKey {
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value !== 'string') return value.length ? value.join('; ') : null;
   if (!value) return null;
   if (kind === 'number') return decimal(value);
-  if (kind === 'date' && !isCalendarDay(value.slice(0, 10))) return null;
+  if (kind === 'date') {
+    const normalized = normalizeDate(value, 'instant');
+    if (!normalized) return null;
+    const timestamp = Date.parse(normalized);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
   return value;
 }
 
@@ -213,17 +270,14 @@ function compareSortKeys(
   left: SortKey,
   right: SortKey,
   direction: number,
-  kind: Kind,
   compareText: (left: string, right: string) => number,
 ): number {
   // Missing values stay last; two missing values still allow the next rule to break the tie.
   if (left === null) return right === null ? 0 : 1;
   if (right === null) return -1;
-  if (typeof left === 'string' && typeof right === 'string') {
-    const order =
-      kind === 'date' ? (left < right ? -1 : left > right ? 1 : 0) : compareText(left, right);
-    return direction * order;
-  }
+  if (typeof left === 'string' && typeof right === 'string')
+    return direction * compareText(left, right);
+  if (typeof left === 'number' && typeof right === 'number') return direction * (left - right);
   if (typeof left === 'boolean' && typeof right === 'boolean')
     return direction * (Number(left) - Number(right));
   if (typeof left === 'object' && typeof right === 'object')
@@ -239,12 +293,15 @@ function compileSearch(
 ): ((row: Row) => boolean) | undefined {
   const text = search.trim().normalize('NFC').toLocaleLowerCase(locale);
   if (!text) return undefined;
-  const terms = text.split(/\s+/);
+  const terms = [...new Set(text.split(/\s+/))];
   const matched = terms.map(() => false);
-  const visibleProperties: Property[] = [];
-  for (const column of view.columns) {
-    const property = propertyIn(column, properties);
-    if (property) visibleProperties.push(property);
+  const searchable = new Set<Column>();
+  for (const { key, search } of NATIVE_COLUMN_DEFINITIONS) if (search) searchable.add(key);
+  for (const column of view.columns) searchable.add(column);
+  const sources: ValueSource[] = [];
+  for (const column of searchable) {
+    const source = isNativeColumn(column) ? column : propertyIn(column, properties);
+    if (source) sources.push(source);
   }
   const chinese = locale.toLowerCase().startsWith('zh');
   let remaining = 0;
@@ -264,22 +321,20 @@ function compileSearch(
       matchText(value ? 'true' : 'false');
       matchText(chinese ? (value ? '是' : '否') : value ? 'yes' : 'no');
     } else if (value) {
-      for (const item of value) matchText(item);
+      for (const item of value) {
+        matchText(item);
+        if (!remaining) break;
+      }
     }
   };
   return (row) => {
     matched.fill(false);
     remaining = terms.length;
-    matchText(row.title);
-    matchText(row.creators);
-    matchText(row.source);
-    matchText(row.year);
-    for (const tag of row.tags) matchText(tag);
-    for (const property of visibleProperties) {
-      if (!remaining) break;
-      matchValue(readProperty(row.extra, property));
+    for (const source of sources) {
+      matchValue(valueIn(row, source));
+      if (!remaining) return true;
     }
-    return remaining === 0;
+    return false;
   };
 }
 
@@ -294,8 +349,8 @@ export function queryCatalog(
   const checks: ((row: Row) => boolean)[] = [];
   for (const [index, filter] of view.filters.entries()) {
     const info = columnInfo(filter.column, properties);
-    const matches = compileFilter(filter, info, catalog.tags, locale);
-    if (matches) checks.push((row) => matches(valueIn(row, filter.column, info?.property)));
+    const matches = info && compileFilter(filter, info, catalog, locale);
+    if (info && matches) checks.push((row) => matches(valueIn(row, info.source)));
     else invalid.push(index);
   }
 
@@ -314,9 +369,8 @@ export function queryCatalog(
     if (!info) return [];
     return [
       {
-        kind: info.kind,
         direction: direction === 'desc' ? -1 : 1,
-        keys: rows.map((row) => sortKey(valueIn(row, column, info.property), info.kind)),
+        keys: rows.map((row) => sortKey(valueIn(row, info.source), info.kind)),
       },
     ];
   });
@@ -326,8 +380,8 @@ export function queryCatalog(
   const order = rows.map((_, index) => index);
   order.sort((left, right) => {
     for (let index = 0; index < sorts.length; index++) {
-      const { keys, direction, kind } = sorts[index]!;
-      const compared = compareSortKeys(keys[left]!, keys[right]!, direction, kind, compareText);
+      const { keys, direction } = sorts[index]!;
+      const compared = compareSortKeys(keys[left]!, keys[right]!, direction, compareText);
       if (compared) return compared;
     }
     // Array sort is stable when all keys tie.

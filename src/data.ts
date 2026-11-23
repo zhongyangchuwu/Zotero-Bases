@@ -1,6 +1,15 @@
 import { changeSchema, createConfig, SCHEMA_PREF, VIEWS_PREF } from './config';
 import type { Prefs } from './config';
-import type { Catalog, Property, PropertyValue, Row, Scope, WorkspaceHost } from './contracts';
+import { NATIVE_COLUMN_DEFINITIONS } from './contracts';
+import type {
+  Catalog,
+  NativeColumn,
+  Property,
+  PropertyValue,
+  Row,
+  Scope,
+  WorkspaceHost,
+} from './contracts';
 import { isReservedPropertyKey, readProperty, validateProperty, writeProperty } from './extra';
 import { isBasesSyncCarrier } from './sync-marker';
 
@@ -19,7 +28,7 @@ interface NativeTag {
   readonly tag: string;
 }
 
-type ItemData = 'itemData' | 'creators' | 'tags' | 'childItems';
+type ItemData = 'itemData' | 'creators' | 'tags' | 'childItems' | 'collections';
 
 interface NativeItem {
   readonly id: number;
@@ -29,16 +38,21 @@ interface NativeItem {
   readonly isFeedItem: boolean;
   readonly deleted: boolean;
   readonly dateAdded: string;
+  readonly dateModified: string;
+  readonly attachmentLastRead: number | null | undefined;
   isRegularItem(): boolean;
   isEditable(): boolean;
   isPDFAttachment(): boolean;
-  getField(field: string, unformatted?: boolean, includeBaseMapped?: boolean): string;
+  getField(field: string | number, unformatted?: boolean): string;
   setField(field: 'extra', value: string): void;
   getCreators(): readonly { firstName: string; lastName: string; fieldMode: number }[];
   getTags(): readonly NativeTag[];
   addTag(tag: string): void;
   removeTag(tag: string): void;
+  getCollections(includeTrashed: false): readonly number[];
+  getNotes(includeTrashed: false): readonly number[];
   getAttachments(includeTrashed?: boolean): readonly number[];
+  getItemLastRead(): number | null;
   getBestAttachment(): Promise<NativeItem | false>;
   saveTx(): Promise<unknown>;
 }
@@ -56,6 +70,7 @@ interface NativeCollection {
 
 export interface ZoteroData {
   readonly Libraries: {
+    readonly userLibraryID: number;
     getAll(): readonly NativeLibrary[];
     get(id: number): NativeLibrary | false;
   };
@@ -72,7 +87,12 @@ export interface ZoteroData {
   readonly Tags: {
     getAll(libraryID: number): readonly NativeTag[] | Promise<readonly NativeTag[]>;
   };
-  readonly ItemFields: { getAll(): readonly { name: string }[] };
+  readonly ItemFields: {
+    getAll(): readonly { name: string }[];
+    getID(field: string): number | false;
+    getFieldIDFromTypeAndBase(itemTypeID: number, field: number): number | false;
+    isValidForType(field: number, itemTypeID: number): boolean;
+  };
   readonly ItemTypes: { getLocalizedString(id: number): string };
   readonly Utilities: {
     readonly Internal: {
@@ -84,7 +104,12 @@ export interface ZoteroData {
     };
   };
   readonly Notifier: {
-    registerObserver(observer: { notify(): void }, types: string[], name: string): string;
+    registerObserver(
+      observer: { notify(action: string, type: string, ids: readonly (string | number)[]): void },
+      types: string[],
+      name: string,
+      priority?: number,
+    ): string;
     unregisterObserver(id: string): void;
   };
 }
@@ -118,7 +143,59 @@ function ordinary(item: NativeItem): boolean {
   return ordinaryShape(item) && !isBasesSyncCarrier(item.getField('extra'));
 }
 
-export function createPropertyValidation(zotero: Pick<ZoteroData, 'ItemFields' | 'Utilities'>): {
+type BibliographicBinding = {
+  readonly key: NativeColumn;
+  readonly id: number | false;
+  readonly unformatted: boolean;
+};
+
+type BibliographicFields = {
+  readonly bibliography: readonly BibliographicBinding[];
+  readonly publication: number | false;
+};
+
+type AttachmentRead = {
+  readonly item: NativeItem;
+  readonly lastRead: NativeItem['attachmentLastRead'];
+};
+
+function fieldForType(
+  fields: ZoteroData['ItemFields'],
+  itemTypeID: number,
+  field: string,
+  baseMapped?: boolean,
+): number | false {
+  const id = fields.getID(field);
+  if (!id) return false;
+  const mapped = (baseMapped && fields.getFieldIDFromTypeAndBase(itemTypeID, id)) || id;
+  return fields.isValidForType(mapped, itemTypeID) ? mapped : false;
+}
+
+function bindFields(fields: ZoteroData['ItemFields'], itemTypeID: number): BibliographicFields {
+  const bibliography: BibliographicBinding[] = [];
+  for (const { key, field, baseMapped, valueType } of NATIVE_COLUMN_DEFINITIONS) {
+    if (!field) continue;
+    bibliography.push({
+      key,
+      id: fieldForType(fields, itemTypeID, field, baseMapped),
+      // Keep Zotero's date prefix and literal text for querying and display.
+      unformatted: valueType === 'date',
+    });
+  }
+  return { bibliography, publication: fieldForType(fields, itemTypeID, 'publicationTitle', true) };
+}
+
+function readLastRead(item: NativeItem): string {
+  const seconds = item.getItemLastRead();
+  if (seconds === null) return '';
+  const date = new Date(seconds * 1_000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : '';
+}
+
+export function createPropertyValidation(zotero: {
+  readonly ItemFields: Pick<ZoteroData['ItemFields'], 'getAll'>;
+  readonly Utilities: ZoteroData['Utilities'];
+}): {
   validate(property: Property): Property;
   suggestPropertyKey(key: string, existing: readonly Property[]): string | undefined;
 } {
@@ -217,6 +294,8 @@ export function createWorkspaceHost(
 
   const { validate, suggestPropertyKey } = createPropertyValidation(zotero);
   const config = createConfig(prefs, initialScope, validate);
+  let loadVersion = 0;
+  let attachmentReads: ReadonlyMap<number, AttachmentRead> | undefined;
 
   function enqueue<T>(operation: () => Promise<T> | T): Promise<T> {
     const run = (pendingWrites.get(zotero) ?? Promise.resolve()).then(operation);
@@ -266,33 +345,78 @@ export function createWorkspaceHost(
   }
 
   async function load(scope: string): Promise<Catalog> {
+    const version = ++loadVersion;
     const available = libraries();
     const catalog = Promise.all(available.map(({ libraryID }) => zotero.Tags.getAll(libraryID)));
     const [candidates, libraryTags] = await Promise.all([itemsFor(scope, available), catalog]);
     const tags = new Set<string>();
     for (const list of libraryTags) for (const { tag } of list) tags.add(tag);
-    if (!candidates.length) return { rows: [], tags };
 
-    await zotero.Items.loadDataTypes(candidates, ['itemData', 'creators', 'tags', 'childItems']);
+    // Zotero groups all missing data types by library inside this bulk call.
+    if (candidates.length) {
+      await zotero.Items.loadDataTypes(candidates, [
+        'itemData',
+        'creators',
+        'tags',
+        'childItems',
+        'collections',
+      ]);
+    }
     const items = candidates.filter(ordinary);
     const attachmentIDs: number[] = [];
+    const attachmentCounts = new Map<number, number>();
     for (const item of items) {
-      for (const id of item.getAttachments(false)) attachmentIDs.push(id);
+      const ids = item.getAttachments(false);
+      if (ids.length) attachmentCounts.set(item.id, ids.length);
+      for (const id of ids) attachmentIDs.push(id);
     }
     const pdfParents = new Set<number>();
+    const reads = new Map<number, AttachmentRead>();
     if (attachmentIDs.length) {
+      // getItemLastRead() resolves attachment IDs synchronously from Zotero's cache.
       for (const attachment of await zotero.Items.getAsync(attachmentIDs)) {
-        if (!attachment.deleted && attachment.parentID && attachment.isPDFAttachment()) {
+        if (attachment.deleted) continue;
+        reads.set(attachment.id, { item: attachment, lastRead: attachment.attachmentLastRead });
+        if (attachment.parentID && attachment.isPDFAttachment())
           pdfParents.add(attachment.parentID);
-        }
       }
     }
+
+    const collections = new Set<string>();
+    const namesByLibrary = new Map<number, Map<number, string>>();
+    const fieldsByType = new Map<number, BibliographicFields>();
     const rows: Row[] = [];
     for (const item of items) {
+      let names = namesByLibrary.get(item.libraryID);
+      if (!names) {
+        names = new Map();
+        for (const collection of zotero.Collections.getByLibrary(item.libraryID, true, false)) {
+          if (collection.deleted || !collection.name) continue;
+          names.set(collection.id, collection.name);
+          collections.add(collection.name);
+        }
+        namesByLibrary.set(item.libraryID, names);
+      }
+      const memberships = new Set<string>();
+      for (const id of item.getCollections(false)) {
+        const name = names.get(id);
+        if (name !== undefined) memberships.add(name);
+      }
+
+      let fields = fieldsByType.get(item.itemTypeID);
+      if (!fields) {
+        fields = bindFields(zotero.ItemFields, item.itemTypeID);
+        fieldsByType.set(item.itemTypeID, fields);
+      }
+      const bibliography: Partial<Record<NativeColumn, string>> = {};
+      for (const { key, id, unformatted } of fields.bibliography) {
+        bibliography[key] = id ? item.getField(id, unformatted) : '';
+      }
       rows.push({
+        ...bibliography,
         id: item.id,
         writable: writable(item),
-        title: item.getField('title', false, true),
+        title: bibliography.title ?? '',
         creators: item
           .getCreators()
           .map(({ firstName, lastName, fieldMode }) =>
@@ -300,17 +424,25 @@ export function createWorkspaceHost(
           )
           .filter(Boolean)
           .join('; '),
-        year: item.getField('year').match(/^(?!0000)\d{4}\b/u)?.[0] ?? '',
+        year: bibliography.date?.match(/^(?!0000)\d{4}\b/u)?.[0] ?? '',
         source:
-          item.getField('publicationTitle', false, true) || item.getField('publisher', false, true),
+          (fields.publication ? item.getField(fields.publication) : '') ||
+          bibliography.publisher ||
+          '',
         type: zotero.ItemTypes.getLocalizedString(item.itemTypeID),
         tags: item.getTags().map(({ tag }) => tag),
         pdf: pdfParents.has(item.id),
         added: item.dateAdded,
+        dateModified: item.dateModified,
+        lastRead: readLastRead(item),
+        notesCount: String(item.getNotes(false).length),
+        attachmentsCount: String(attachmentCounts.get(item.id) ?? 0),
+        collections: [...memberships].sort(),
         extra: item.getField('extra'),
       });
     }
-    return { rows, tags };
+    if (version === loadVersion) attachmentReads = reads;
+    return { rows, tags, collections };
   }
 
   return {
@@ -488,14 +620,43 @@ export function createWorkspaceHost(
       };
       const notifierID = zotero.Notifier.registerObserver(
         {
-          notify() {
+          notify(action, type, ids) {
+            if (type === 'file') {
+              if (action !== 'open' && action !== 'close' && action !== 'pageChange') return;
+              // Zotero updates last read at most once every five minutes on page turns in
+              // the same attachment. Don't reload the catalog for an unchanged timestamp.
+              const cachedReads = attachmentReads;
+              if (
+                cachedReads &&
+                !ids.some((id) => {
+                  const cached = cachedReads.get(Number(id));
+                  return cached && cached.lastRead !== cached.item.attachmentLastRead;
+                })
+              )
+                return;
+            }
+            // Group attachment last-read values may also be synced via My Library settings.
+            if (type === 'setting') {
+              const prefix = `${zotero.Libraries.userLibraryID}/lastRead_g`;
+              if (
+                !ids.some(
+                  (id) =>
+                    typeof id === 'string' &&
+                    id.startsWith(prefix) &&
+                    /^\d+_/u.test(id.slice(prefix.length)),
+                )
+              )
+                return;
+            }
             const batch = batchNotifications.get(zotero);
             if (batch) batch.add(data);
             else data();
           },
         },
-        ['item', 'tag', 'item-tag', 'collection', 'collection-item', 'group'],
+        ['item', 'tag', 'item-tag', 'collection', 'collection-item', 'group', 'file', 'setting'],
         'zotero-bases',
+        // Run after Zotero's default-priority AttachmentReadObserver updates its cache.
+        101,
       );
       const prefObservers: symbol[] = [];
       const detach = () => {

@@ -1,5 +1,12 @@
-import type { Grouping, Property, Row } from './contracts';
+import {
+  isNativeColumn,
+  NATIVE_COLUMN_BY_KEY,
+  type Grouping,
+  type Property,
+  type Row,
+} from './contracts';
 import { readProperty } from './extra';
+import { dateMonth } from './query';
 
 type GroupValue = string | boolean | null;
 
@@ -19,17 +26,37 @@ export function groupRows(
   properties: readonly Property[],
   tags: ReadonlySet<string>,
   locale: string,
+  collections?: ReadonlySet<string>,
 ): RowGroup[] | undefined {
   let key: (row: Row) => GroupValue;
-  if (group.column === 'tags') {
+  const { column } = group;
+  if (column === 'tags') {
     const { tag } = group;
     if (!tags.has(tag)) return undefined;
     key = (row) => row.tags.includes(tag);
-  } else if (group.column === 'year' || group.column === 'type') {
-    const { column } = group;
-    key = (row) => row[column] || null;
+  } else if (column === 'collections') {
+    const { collection } = group;
+    if (!collection || !collections?.has(collection)) return undefined;
+    key = (row) => Array.isArray(row.collections) && row.collections.includes(collection);
+  } else if (isNativeColumn(column)) {
+    const { grouping } = NATIVE_COLUMN_BY_KEY[column];
+    if (grouping === 'value') {
+      key = (row) => {
+        const value = row[column];
+        return typeof value === 'string'
+          ? value || null
+          : typeof value === 'boolean'
+            ? value
+            : null;
+      };
+    } else if (grouping === 'month') {
+      key = (row) => {
+        const value = row[column];
+        return typeof value === 'string' ? (dateMonth(value) ?? null) : null;
+      };
+    } else return undefined;
   } else {
-    const name = group.column.slice('property:'.length);
+    const name = column.slice('property:'.length);
     const property = properties.find(({ key }) => key === name);
     if (!property || !isGroupProperty(property)) return undefined;
     key = (row) => {

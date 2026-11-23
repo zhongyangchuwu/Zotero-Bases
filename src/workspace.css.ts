@@ -150,13 +150,14 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-select-chevron {
   position: relative;
   display: inline-grid;
+  min-width: 0;
   max-width: 100%;
 }
-.zb-workspace .zb-select-chevron > select {
+.zb-workspace .zb-select-chevron > select:not([multiple]) {
   appearance: none;
   padding-inline-end: 1.85rem;
 }
-.zb-workspace .zb-select-chevron::after {
+.zb-workspace .zb-select-chevron:has(> select:not([multiple]))::after {
   content: '';
   position: absolute;
   inset-inline-end: 0.7rem;
@@ -234,6 +235,26 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-column-rule label { gap: 0.35rem; overflow-wrap: anywhere; }
 .zb-workspace .zb-column-rule svg { flex: none; color: var(--zb-muted); }
 .zb-workspace .zb-column-pane { min-width: min(15rem, 100%); }
+.zb-workspace .zb-column-search { width: 100%; min-width: 0; }
+.zb-workspace .zb-column-group { display: grid; gap: 0.35rem; min-width: 0; }
+.zb-workspace .zb-column-group + .zb-column-group {
+  border-block-start: 1px solid var(--zb-border);
+  padding-block-start: 0.35rem;
+}
+.zb-workspace .zb-column-group > strong { font-size: 0.9em; }
+.zb-workspace .zb-column-group-trigger {
+  background: transparent;
+  border-color: transparent;
+  text-align: start;
+  font-weight: 600;
+  padding-inline: 0.25rem;
+}
+.zb-workspace .zb-column-empty { margin: 0; color: var(--zb-muted); }
+.zb-workspace .zb-column-position {
+  color: var(--zb-muted);
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+}
 .zb-workspace .zb-order-button { min-width: 1.7rem; padding-inline: 0.32rem; }
 .zb-workspace .zb-sort-rule { gap: 0.3rem; }
 .zb-workspace .zb-sort-rule select { min-width: 0; }
@@ -466,9 +487,47 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace .zb-cell-number, .zb-workspace .zb-cell-number > button {
   text-align: end;
+  font-family: ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
 }
-.zb-workspace td[data-column='added'] { font-variant-numeric: tabular-nums; }
+.zb-workspace .zb-cell-monospace { font-family: ui-monospace, monospace; }
+.zb-workspace .zb-cell-date { font-variant-numeric: tabular-nums; }
+.zb-workspace td[data-column='doi']:has(> .zb-link-copy) { position: relative; }
+.zb-workspace .zb-link-open {
+  display: inline-block;
+  vertical-align: middle;
+  min-height: 1.45rem;
+  padding: 0 2px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--zb-accent);
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: inherit;
+  overflow: hidden;
+  overflow-wrap: inherit;
+  text-overflow: ellipsis;
+}
+.zb-workspace .zb-link-control:focus-visible { outline-offset: -2px; }
+.zb-workspace .zb-link-copy {
+  position: absolute;
+  inset-inline-end: 0.35rem;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  min-height: 1.45rem;
+  padding: 0 0.3rem;
+  line-height: 1;
+  background: var(--zb-surface);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 16%);
+  opacity: 0;
+  pointer-events: none;
+}
+.zb-workspace .zb-link-copy:hover { background: var(--zb-selected); }
+.zb-workspace td:is(:hover, :focus-within) > .zb-link-copy {
+  opacity: 1;
+  pointer-events: auto;
+}
 .zb-workspace .zb-cell-pills {
   display: flex;
   align-items: center;
@@ -493,6 +552,11 @@ export const workspaceCSS = String.raw`
   line-height: 1.45;
 }
 .zb-workspace .zb-cell-pill { flex: none; white-space: nowrap; }
+.zb-workspace .zb-cell-collections .zb-cell-pill {
+  border-color: color-mix(in srgb, var(--zb-pill-border) 66%, transparent);
+  background: color-mix(in srgb, var(--zb-pill-bg) 70%, transparent);
+  color: var(--zb-muted);
+}
 .zb-workspace .zb-type-badge { color: var(--zb-muted); }
 .zb-workspace [data-tone='green'] { --zb-choice-tone: #23935d; }
 .zb-workspace [data-tone='amber'] { --zb-choice-tone: #d28b14; }
@@ -572,8 +636,7 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace[data-appearance='terminal'][data-compact-search] .zb-search { border-radius: 0; }
 .zb-workspace[data-appearance='terminal'] :where(
-  .zb-table-status, .zb-status, .zb-type-badge, .zb-pdf-mark, .zb-cell-number,
-  td[data-column='year'], td[data-column='added']
+  .zb-table-status, .zb-status, .zb-type-badge, .zb-pdf-mark, .zb-cell-date
 ) {
   font-family: ui-monospace, monospace;
 }

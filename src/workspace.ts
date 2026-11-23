@@ -1,7 +1,11 @@
 import {
+  DEFAULT_COLUMNS,
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTH,
+  NATIVE_COLUMN_BY_KEY,
+  NATIVE_COLUMN_DEFINITIONS,
   NATIVE_COLUMNS,
+  isNativeColumn,
   OPTION_COLORS,
   type BulkChange,
   type Catalog,
@@ -48,21 +52,9 @@ const FALLBACK_VIEWPORT_HEIGHT = 680;
 const SEARCH_DELAY = 140;
 const SELECT_COLUMN_WIDTH = 36;
 const COLUMN_ACTION_WIDTH = 40;
-const DEFAULT_COLUMN_WIDTH: Readonly<Record<(typeof NATIVE_COLUMNS)[number], number>> = {
-  title: 360,
-  creators: 180,
-  year: 70,
-  source: 168,
-  type: 112,
-  tags: 185,
-  pdf: 56,
-  added: 112,
-};
 
 function defaultColumnWidth(column: Column): number {
-  return column.startsWith('property:')
-    ? 140
-    : DEFAULT_COLUMN_WIDTH[column as keyof typeof DEFAULT_COLUMN_WIDTH];
+  return isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column].defaultWidth : 140;
 }
 
 function columnWidth(view: View, column: Column): number {
@@ -92,6 +84,12 @@ const words = {
   allLibraries: ['All libraries', '全部文库'],
   columns: ['Columns', '列'],
   showColumns: ['Show columns', '显示列'],
+  searchColumns: ['Search columns', '搜索列'],
+  commonColumns: ['Common columns', '常用列'],
+  customColumns: ['Custom properties', '自定义属性'],
+  moreColumns: ['More Zotero columns', '更多 Zotero 列'],
+  noColumnMatches: ['No matching columns', '没有匹配的列'],
+  noCustomColumns: ['No custom properties', '尚无自定义属性'],
   sort: ['Sort', '排序'],
   sortField: ['Sort field', '排序字段'],
   addSort: ['Add sort', '添加排序'],
@@ -126,20 +124,17 @@ const words = {
   groupDirection: ['Group direction', '分组顺序'],
   groupTag: ['Tag to group by', '用于分组的标签'],
   chooseTag: ['Choose an existing tag', '选择现有标签'],
+  groupCollection: ['Collection to group by', '用于分组的分类'],
   invalidGrouping: ['Unavailable grouping is ignored.', '已忽略失效分组。'],
   clearGrouping: ['Clear grouping', '清除分组'],
   missingGroup: ['No value', '未设置'],
   withTag: ['With tag', '有标签'],
   withoutTag: ['Without tag', '无标签'],
-  title: ['Title', '标题'],
-  creators: ['Authors', '作者'],
-  year: ['Year', '年份'],
-  source: ['Publication', '期刊／来源'],
-  type: ['Item type', '条目类型'],
-  tags: ['Tags', '标签'],
-  pdf: ['PDF', 'PDF'],
+  inCollection: ['In collection', '属于分类'],
+  outsideCollection: ['Not in collection', '不属于分类'],
   openPDF: ['Open PDF', '打开 PDF'],
-  added: ['Date added', '添加时间'],
+  openLink: ['Open external link', '打开外部链接'],
+  copyDOI: ['Copy DOI', '复制 DOI'],
   filters: ['Filters', '筛选'],
   filterAnd: ['Match all conditions', '符合所有条件'],
   filterColumn: ['Filter field', '筛选字段'],
@@ -150,6 +145,12 @@ const words = {
   chooseValue: ['Choose a value', '选择值'],
   contains: ['Contains', '包含'],
   equals: ['Equals', '等于'],
+  notEquals: ['Does not equal', '不等于'],
+  notContains: ['Does not contain', '不包含'],
+  gt: ['Greater than', '大于'],
+  lt: ['Less than', '小于'],
+  belongs: ['Belongs to', '属于'],
+  notBelongs: ['Does not belong to', '不属于'],
   gte: ['At least', '大于或等于'],
   lte: ['At most', '小于或等于'],
   has: ['Is not empty', '不为空'],
@@ -251,6 +252,7 @@ interface WorkspaceOptions {
   sync?: SyncPort;
   global?: GlobalPreferenceStore;
   openPreferences?: () => void;
+  linkActions?: { open(url: string): void; copy(text: string): void };
 }
 
 type ActiveCell = { key: string; column: Column };
@@ -321,7 +323,7 @@ function mountWorkspaceSurface(
   let result: QueryResult | undefined;
   let groups: readonly RowGroup[] | undefined;
   const foldedGroups = restored?.foldedGroups ?? new Set<RowGroup['value']>();
-  let choosingGroupTag = false;
+  let choosingGroupMember: 'tags' | 'collections' | undefined;
   const selected = restored?.selected ?? new Set<number>();
   let selectionAnchor = restored?.selectionAnchor;
   let bulkPending = false;
@@ -358,6 +360,7 @@ function mountWorkspaceSurface(
     authorFormat: () => globals.authorFormat,
     columnName,
     open: openRow,
+    linkActions: options.linkActions,
     toggle(row, property, checked) {
       saveCell(host.setProperty(row.id, property.key, checked ? true : null));
     },
@@ -432,7 +435,7 @@ function mountWorkspaceSurface(
     node.dataset.focus = key;
   }
 
-  function preserveFocus(region: HTMLElement, render: () => void): void {
+  function preserveFocus(region: HTMLElement, render: () => void, pane = region): void {
     const focused = doc.activeElement;
     const key = focused && region.contains(focused) ? focused.getAttribute('data-focus') : null;
     render();
@@ -443,7 +446,7 @@ function mountWorkspaceSurface(
           return;
         }
       }
-      if (popovers.isOpen(region)) firstControl(region)?.focus({ preventScroll: true });
+      if (popovers.isOpen(pane)) firstControl(pane)?.focus({ preventScroll: true });
     }
   }
 
@@ -481,6 +484,7 @@ function mountWorkspaceSurface(
   const popovers = createPopover(surface);
   const headerMenu = createPane(t('columnMenu'), 'zb-view-action-list');
   let columnsFromTail = false;
+  let moreColumnsOpen = false;
 
   function createPane(label: string, className = ''): HTMLDivElement {
     const pane = element('div', `zb-pane ${className}`.trim());
@@ -493,6 +497,11 @@ function mountWorkspaceSurface(
   }
 
   function openPane(anchor: HTMLElement, pane: HTMLElement): void {
+    if (pane === columnPane && !popovers.isOpen(columnPane)) {
+      columnSearch.value = '';
+      moreColumnsOpen = false;
+      renderColumns();
+    }
     popovers.open(anchor, pane, { initialFocus: () => firstControl(pane) });
   }
 
@@ -549,6 +558,13 @@ function mountWorkspaceSurface(
   const filterPane = createPane(t('filters'));
   const groupPane = createPane(t('grouping'));
   const columnPane = createPane(t('columns'), 'zb-column-pane');
+  const columnSearch = input(t('searchColumns'));
+  columnSearch.type = 'search';
+  columnSearch.className = 'zb-column-search';
+  columnSearch.placeholder = t('searchColumns');
+  const columnList = element('div', 'zb-pane-list');
+  columnPane.append(columnSearch, columnList);
+  columnSearch.addEventListener('input', renderColumns);
   const propertyPane = createPane(t('properties'));
   const sortTool = tool(t('sort'), sortPane);
   const filterTool = tool(t('filters'), filterPane);
@@ -777,6 +793,25 @@ function mountWorkspaceSurface(
       (!surface.contains(target) && target !== root)
     )
       return;
+    if (
+      event.key === 'Escape' &&
+      !event.isComposing &&
+      event.keyCode !== 229 &&
+      !event.repeat &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      popovers.isOpen(columnPane) &&
+      columnSearch.value
+    ) {
+      columnSearch.value = '';
+      moreColumnsOpen = false;
+      renderColumns();
+      columnSearch.focus({ preventScroll: true });
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (!composingSearch && popovers.consumeEscape(event)) return;
     if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey) {
       if (event.key === ' ' && target.closest('button, input, select, textarea')) {
@@ -889,8 +924,9 @@ function mountWorkspaceSurface(
   }
 
   function columnName(column: Column): string {
-    if (column.startsWith('property:')) return column.slice('property:'.length);
-    return t(column as (typeof NATIVE_COLUMNS)[number]);
+    return isNativeColumn(column)
+      ? NATIVE_COLUMN_BY_KEY[column].labels[zh ? 1 : 0]
+      : column.slice('property:'.length);
   }
 
   function columnItems(): [Column, string][] {
@@ -917,14 +953,17 @@ function mountWorkspaceSurface(
     const changedGrouping = !same(previousView.group, view.group);
     const changedDensity = previousView.density !== view.density;
     const changedWidths = !same(previousView.columnWidths, view.columnWidths);
-    if (changedActive || changedScope || changedGrouping) choosingGroupTag = false;
+    if (changedActive || changedScope || changedGrouping) choosingGroupMember = undefined;
     if (
       changedActive ||
       changedScope ||
       previousView.group?.column !== view.group?.column ||
       (previousView.group?.column === 'tags' &&
         view.group?.column === 'tags' &&
-        previousView.group.tag !== view.group.tag)
+        previousView.group.tag !== view.group.tag) ||
+      (previousView.group?.column === 'collections' &&
+        view.group?.column === 'collections' &&
+        previousView.group.collection !== view.group.collection)
     ) {
       foldedGroups.clear();
     }
@@ -1027,7 +1066,7 @@ function mountWorkspaceSurface(
           name: unique,
           id,
           scope: host.initialScope(),
-          columns: NATIVE_COLUMNS,
+          columns: DEFAULT_COLUMNS,
           sorts: [{ column: 'title', direction: 'asc' }],
           filters: [],
           density: globals.defaultDensity,
@@ -1183,45 +1222,106 @@ function mountWorkspaceSurface(
   }
 
   function renderColumns(): void {
-    preserveFocus(columnPane, () => {
-      const visible = visibleColumns();
-      const defaults = allColumns();
-      const ordered = new Set(visible);
-      const list = element('div', 'zb-pane-list');
-      for (const [index, column] of [
-        ...visible,
-        ...defaults.filter((entry) => !ordered.has(entry)),
-      ].entries()) {
-        const row = element('div', 'zb-line zb-column-rule');
-        const label = element('label', 'zb-line');
-        const caption = columnName(column);
-        const check = element('input');
-        check.type = 'checkbox';
-        check.checked = index < visible.length;
-        check.disabled = check.checked && visible.length === 1;
-        focusKey(check, column);
-        check.addEventListener('change', () => showColumn(column, check.checked));
-        label.append(check, createFieldIcon(doc, column, propertyFor(column)?.type), caption);
-        row.append(label);
-        if (check.checked) {
-          const up = moveButton(t('moveUp'), '↑', caption, index > 0, () =>
-            moveColumn(column, index - 1),
-          );
-          const down = moveButton(t('moveDown'), '↓', caption, index + 1 < visible.length, () =>
-            moveColumn(column, index + 1),
-          );
-          focusKey(up, `up:${column}`);
-          focusKey(down, `down:${column}`);
-          row.append(up, down);
+    preserveFocus(
+      columnList,
+      () => {
+        const visible = visibleColumns();
+        const defaults = allColumns();
+        const ordered = new Map(visible.map((column, index) => [column, index]));
+        const term = columnSearch.value.trim().normalize('NFC').toLowerCase();
+        const matches = (label: string) => label.normalize('NFC').toLowerCase().includes(term);
+        const byGroup: Record<'common' | 'custom' | 'more', Column[]> = {
+          common: [],
+          custom: [],
+          more: [],
+        };
+        for (const column of [...visible, ...defaults.filter((key) => !ordered.has(key))]) {
+          const definition = isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column] : undefined;
+          if (term && !matches(column) && !definition?.labels.some(matches)) continue;
+          byGroup[definition?.group ?? 'custom'].push(column);
         }
-        list.append(row);
-      }
-      const defaultOrder = defaults.filter((column) => ordered.has(column));
-      const reset = button(t('resetOrder'), () => reorderColumns(defaultOrder));
-      focusKey(reset, 'reset-order');
-      reset.disabled = same(visible, defaultOrder);
-      columnPane.replaceChildren(list, reset);
-    });
+        const sections: HTMLElement[] = [];
+        for (const [key, heading] of [
+          ['common', t('commonColumns')],
+          ['custom', t('customColumns')],
+          ['more', t('moreColumns')],
+        ] as const) {
+          const columns = byGroup[key];
+          if (term && !columns.length) continue;
+          const section = element('section', 'zb-column-group');
+          section.dataset.columnGroup = key;
+          const list = element('div', 'zb-pane-list');
+          list.id = `${mountId}-columns-${key}`;
+          if (key === 'more') {
+            const expanded = !!term || moreColumnsOpen;
+            const toggle = !term
+              ? button(
+                  `${expanded ? '▾' : '▸'} ${heading}`,
+                  () => {
+                    moreColumnsOpen = !moreColumnsOpen;
+                    renderColumns();
+                  },
+                  'zb-column-group-trigger',
+                  heading,
+                )
+              : undefined;
+            if (toggle) {
+              focusKey(toggle, 'more-columns');
+              toggle.setAttribute('aria-expanded', String(expanded));
+              toggle.setAttribute('aria-controls', list.id);
+              section.append(toggle);
+            } else {
+              section.append(element('strong', '', heading));
+            }
+            list.hidden = !expanded;
+          } else {
+            section.append(element('strong', '', heading));
+          }
+          if (!columns.length)
+            list.append(element('span', 'zb-column-empty', t('noCustomColumns')));
+          for (const column of columns) {
+            const index = ordered.get(column);
+            const row = element('div', 'zb-line zb-column-rule');
+            const label = element('label', 'zb-line');
+            const caption = columnName(column);
+            const check = element('input');
+            check.type = 'checkbox';
+            check.checked = index !== undefined;
+            check.disabled = check.checked && visible.length === 1;
+            focusKey(check, column);
+            check.addEventListener('change', () => showColumn(column, check.checked));
+            label.append(check, createFieldIcon(doc, column, propertyFor(column)?.type), caption);
+            if (index !== undefined) {
+              const rank = element('span', 'zb-column-position', `#${index + 1}`);
+              rank.setAttribute('aria-hidden', 'true');
+              label.append(rank);
+            }
+            row.append(label);
+            if (index !== undefined) {
+              const up = moveButton(t('moveUp'), '↑', caption, index > 0, () =>
+                moveColumn(column, index - 1),
+              );
+              const down = moveButton(t('moveDown'), '↓', caption, index + 1 < visible.length, () =>
+                moveColumn(column, index + 1),
+              );
+              focusKey(up, `up:${column}`);
+              focusKey(down, `down:${column}`);
+              row.append(up, down);
+            }
+            list.append(row);
+          }
+          section.append(list);
+          sections.push(section);
+        }
+        const defaultOrder = defaults.filter((column) => ordered.has(column));
+        const reset = button(t('resetOrder'), () => reorderColumns(defaultOrder));
+        focusKey(reset, 'reset-order');
+        reset.disabled = same(visible, defaultOrder);
+        if (!sections.length) sections.push(element('p', 'zb-column-empty', t('noColumnMatches')));
+        columnList.replaceChildren(...sections, reset);
+      },
+      columnPane,
+    );
   }
 
   function setSort(column: Column, direction: Direction, primary = false): void {
@@ -1296,8 +1396,8 @@ function mountWorkspaceSurface(
         focusKey(remove, `remove:${rule.column}`);
         row.append(
           element('span', 'zb-sort-priority', context),
-          field,
-          direction,
+          withChevron(field),
+          withChevron(direction),
           up,
           down,
           remove,
@@ -1419,7 +1519,7 @@ function mountWorkspaceSurface(
   }
 
   function setGrouping(group: Grouping | undefined): void {
-    choosingGroupTag = false;
+    choosingGroupMember = undefined;
     if (!same(activeView().group, group)) updateView({ group });
     else renderGrouping();
   }
@@ -1428,13 +1528,11 @@ function mountWorkspaceSurface(
     renderRegion(groupPane, () => {
       const view = activeView();
       const group = view.group;
-      const column = choosingGroupTag ? 'tags' : (group?.column ?? '');
-      const items: [Grouping['column'] | '', string][] = [
-        ['', t('noGrouping')],
-        ['year', t('year')],
-        ['type', t('type')],
-        ['tags', t('tags')],
-      ];
+      const column = choosingGroupMember ?? group?.column ?? '';
+      const items: [Grouping['column'] | '', string][] = [['', t('noGrouping')]];
+      for (const { key, grouping } of NATIVE_COLUMN_DEFINITIONS) {
+        if (grouping) items.push([key, columnName(key)]);
+      }
       for (const property of preferences.properties) {
         if (isGroupProperty(property)) items.push([`property:${property.key}`, property.key]);
       }
@@ -1446,23 +1544,23 @@ function mountWorkspaceSurface(
       focusKey(by, 'group');
       by.addEventListener('change', () => {
         const column = items.find(([value]) => value === by.value)?.[0];
-        if (column === 'tags') {
-          choosingGroupTag = true;
+        if (column === 'tags' || column === 'collections') {
+          choosingGroupMember = column;
           renderGrouping();
-          groupPane.querySelector<HTMLInputElement>('input')?.focus();
+          groupPane.querySelector<HTMLElement>('[data-focus="group-member"]')?.focus();
         } else {
           setGrouping(column ? { column, direction: group?.direction ?? 'asc' } : undefined);
         }
       });
       const byLabel = element('label', 'zb-line');
-      byLabel.append(t('groupBy'), by);
+      byLabel.append(t('groupBy'), withChevron(by));
       controls.append(byLabel);
 
       if (column === 'tags') {
         const field = input(t('groupTag'), group?.column === 'tags' ? group.tag : '');
         field.placeholder = t('chooseTag');
         field.dataset.keepFocus = '';
-        focusKey(field, 'tag');
+        focusKey(field, 'group-member');
         const suggestions = element('datalist');
         suggestions.id = `${mountId}-group-tags`;
         suggestTags(field, suggestions);
@@ -1470,7 +1568,7 @@ function mountWorkspaceSurface(
           if (!field.isConnected) return;
           const current = activeView();
           if (current.id !== view.id || current.scope !== view.scope) return;
-          if (!choosingGroupTag && current.group?.column !== 'tags') return;
+          if (choosingGroupMember !== 'tags' && current.group?.column !== 'tags') return;
           const tag = catalog?.tags.has(field.value) ? field.value : field.value.trim();
           if (!catalog?.tags.has(tag)) return;
           const next = {
@@ -1487,8 +1585,24 @@ function mountWorkspaceSurface(
           if (event.key === 'Enter' && !event.isComposing) commit();
         });
         controls.append(field, suggestions);
+      } else if (column === 'collections') {
+        const field = valuePicker(
+          t('groupCollection'),
+          collectionNames(),
+          group?.column === 'collections' ? group.collection : '',
+        );
+        focusKey(field, 'group-member');
+        field.addEventListener('change', () => {
+          if (!catalog?.collections?.has(field.value)) return;
+          setGrouping({
+            column,
+            collection: field.value,
+            direction: activeView().group?.direction ?? 'asc',
+          });
+        });
+        controls.append(withChevron(field));
       }
-      if (group && !choosingGroupTag) {
+      if (group && !choosingGroupMember) {
         const direction = select(
           t('groupDirection'),
           [
@@ -1503,15 +1617,30 @@ function mountWorkspaceSurface(
           if (current)
             setGrouping({ ...current, direction: direction.value === 'desc' ? 'desc' : 'asc' });
         });
-        controls.append(direction);
+        controls.append(withChevron(direction));
       }
       groupPane.replaceChildren(controls);
     });
   }
 
+  function collectionNames(): string[] {
+    return [...(catalog?.collections ?? [])].sort((a, b) => a.localeCompare(b, options.language));
+  }
+
+  function valuePicker(label: string, values: readonly string[], value: string): HTMLSelectElement {
+    const choices: [string, string][] = [['', t('chooseValue')]];
+    for (const entry of values) choices.push([entry, entry]);
+    if (value && !values.includes(value)) choices.push([value, `${value} (${t('unavailable')})`]);
+    return select(label, choices, value);
+  }
+
   function defaultOperand(column: Column, operator: Operator): string {
     if (operator === 'has' || operator === 'missing') return '';
-    if (column === 'pdf' || propertyFor(column)?.type === 'checkbox') return 'true';
+    if (
+      (isNativeColumn(column) && NATIVE_COLUMN_BY_KEY[column].valueType === 'boolean') ||
+      propertyFor(column)?.type === 'checkbox'
+    )
+      return 'true';
     return '';
   }
 
@@ -1545,12 +1674,25 @@ function mountWorkspaceSurface(
           replaceFilter(index, defaultFilter(column.value as Column)),
         );
         const rawOperators = filterOperators(filter.column, preferences.properties);
+        const operatorName = (operator: Operator): string =>
+          filter.column === 'collections'
+            ? t(
+                operator === 'contains'
+                  ? 'belongs'
+                  : operator === 'notContains'
+                    ? 'notBelongs'
+                    : operator,
+              )
+            : t(operator);
         const operators = rawOperators.map((operator): [Operator, string] => [
           operator,
-          t(operator),
+          operatorName(operator),
         ]);
         if (!rawOperators.includes(filter.operator)) {
-          operators.push([filter.operator, `${t(filter.operator)} (${t('unavailable')})`]);
+          operators.push([
+            filter.operator,
+            `${operatorName(filter.operator)} (${t('unavailable')})`,
+          ]);
         }
         const operand = select(
           scopedName(t('filterOperator'), context),
@@ -1566,7 +1708,7 @@ function mountWorkspaceSurface(
             value: defaultOperand(filter.column, operator),
           });
         });
-        line.append(column, operand);
+        line.append(withChevron(column), withChevron(operand));
         if (filter.operator !== 'has' && filter.operator !== 'missing') {
           const field = filterValueInput(filter, context);
           let current = filter;
@@ -1582,7 +1724,9 @@ function mountWorkspaceSurface(
             replaceFilter(index, current, true);
           });
           focusKey(field, `value:${index}`);
-          line.append(field);
+          line.append(
+            field.localName === 'select' ? withChevron(field as HTMLSelectElement) : field,
+          );
         }
         const remove = button(
           t('removeFilter'),
@@ -1608,7 +1752,8 @@ function mountWorkspaceSurface(
     const { column, value } = filter;
     const label = scopedName(t('filterValue'), context);
     const property = propertyFor(column);
-    if (column === 'pdf' || property?.type === 'checkbox') {
+    const type = isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column].valueType : property?.type;
+    if (type === 'boolean' || type === 'checkbox') {
       const items: [string, string][] = [
         ['true', t('yes')],
         ['false', t('no')],
@@ -1616,20 +1761,13 @@ function mountWorkspaceSurface(
       if (!items.some(([id]) => id === value)) items.unshift([value, t('chooseValue')]);
       return select(label, items, value);
     }
-    const values =
-      property && isSelectProperty(property.type) ? (property.options ?? []) : undefined;
-    if (values) {
-      const choices: [string, string][] = [
-        ['', t('chooseValue')],
-        ...values.map((entry): [string, string] => [entry, entry]),
-      ];
-      if (value && !values.includes(value)) choices.push([value, `${value} (${t('unavailable')})`]);
-      return select(label, choices, value);
-    }
+    if (column === 'collections') return valuePicker(label, collectionNames(), value);
+    if (property && isSelectProperty(property.type))
+      return valuePicker(label, property.options ?? [], value);
     const field = input(label, value);
     field.dataset.keepFocus = '';
-    if (column === 'year' || property?.type === 'number') field.inputMode = 'decimal';
-    if (column === 'added') field.placeholder = 'YYYY-MM-DD';
+    if (type === 'number') field.inputMode = 'decimal';
+    if (type === 'date') field.placeholder = 'YYYY-MM-DD';
     if (column === 'tags') suggestTags(field, tagValues);
     return field;
   }
@@ -1737,7 +1875,7 @@ function mountWorkspaceSurface(
         }
       });
     });
-    form.append(key, hint, type, values, submit);
+    form.append(key, hint, withChevron(type), values, submit);
     return [form, updateHint];
   }
 
@@ -1941,7 +2079,7 @@ function mountWorkspaceSurface(
     const editor = element('div', 'zb-line');
     let current: Property | undefined;
     let valueForSubmit: (() => PropertyValue | undefined) | undefined;
-    form.append(picker, editor);
+    form.append(withChevron(picker), editor);
 
     function drawValue(): void {
       const property = preferences.properties.find(({ key }) => key === picker.value);
@@ -1986,7 +2124,7 @@ function mountWorkspaceSurface(
           setValue(property.type === 'checkbox' ? value === 'true' : value);
           field.value = '';
         });
-        editor.append(field);
+        editor.append(withChevron(field));
       }
       if (valueForSubmit) {
         const apply = element('button', '', t('bulkSet'));
@@ -2153,6 +2291,9 @@ function mountWorkspaceSurface(
       (data) => {
         if (disposed || ticket !== loadTicket) return;
         catalog = data;
+        if (activeView().filters.some(({ column }) => column === 'collections')) renderFilters();
+        if (choosingGroupMember === 'collections' || activeView().group?.column === 'collections')
+          renderGrouping();
         if (status.textContent === t('loadError')) showStatus('');
         evaluate();
       },
@@ -2172,7 +2313,14 @@ function mountWorkspaceSurface(
       : undefined;
     groups =
       result && view.group && catalog
-        ? groupRows(result.rows, view.group, preferences.properties, catalog.tags, options.language)
+        ? groupRows(
+            result.rows,
+            view.group,
+            preferences.properties,
+            catalog.tags,
+            options.language,
+            catalog.collections,
+          )
         : undefined;
     const invalid = result?.invalid.length ?? 0;
     const invalidGroup = Boolean(result && view.group && !groups);
@@ -2473,7 +2621,7 @@ function mountWorkspaceSurface(
       row.remove();
       mounted.delete(key);
     }
-    const tag = activeView().group;
+    const group = activeView().group;
     let next: HTMLTableRowElement = trailing;
     let added = false;
     for (let i = range.end - 1; i >= range.start; i--) {
@@ -2482,11 +2630,7 @@ function mountWorkspaceSurface(
       if (!row) {
         row =
           entry.kind === 'group'
-            ? renderGroupHeader(
-                entry,
-                columns.length + 2,
-                tag?.column === 'tags' ? tag.tag : undefined,
-              )
+            ? renderGroupHeader(entry, columns.length + 2, group)
             : renderRow(entry.row, columns);
         row.dataset.rowKey = entry.key;
         row.setAttribute('aria-rowindex', String(i + 2));
@@ -2539,8 +2683,16 @@ function mountWorkspaceSurface(
   function paintActiveCell(): void {
     const cell = activeNode();
     if (cell !== paintedCell) {
-      if (paintedCell) delete paintedCell.dataset.activeCell;
-      if (cell) cell.dataset.activeCell = '';
+      if (paintedCell) {
+        delete paintedCell.dataset.activeCell;
+        for (const link of paintedCell.querySelectorAll<HTMLElement>('.zb-link-control'))
+          link.tabIndex = -1;
+      }
+      if (cell) {
+        cell.dataset.activeCell = '';
+        for (const link of cell.querySelectorAll<HTMLElement>('.zb-link-control'))
+          link.tabIndex = 0;
+      }
       paintedCell = cell;
     }
     if (cell && restoreGridFocus && doc.activeElement === tableWrap) {
@@ -2636,7 +2788,11 @@ function mountWorkspaceSurface(
       target.closest('.zb-editor')
     )
       return;
-    if (event.key === 'Enter' && target.matches('input[type=checkbox], .zb-title-action')) return;
+    if (
+      event.key === 'Enter' &&
+      target.matches('input[type=checkbox], .zb-title-action, .zb-link-control')
+    )
+      return;
     const command = tableKeys.handle(event);
     if (!command) return;
     if (!runGridCommand(command)) return;
@@ -2713,7 +2869,9 @@ function mountWorkspaceSurface(
           setGroupFolded(entry, !entry.folded);
         } else {
           if (!activeNode()) moveGrid(index, column, false);
-          activeNode()?.querySelector<HTMLElement>('button, input[type=checkbox]')?.click();
+          activeNode()
+            ?.querySelector<HTMLElement>('button:not(.zb-link-control), input[type=checkbox]')
+            ?.click();
         }
         return true;
     }
@@ -2842,20 +3000,19 @@ function mountWorkspaceSurface(
   function renderGroupHeader(
     entry: Extract<VirtualRow, { kind: 'group' }>,
     colspan: number,
-    tag: string | undefined,
+    group: Grouping | undefined,
   ): HTMLTableRowElement {
     const {
       group: { value, rows },
       folded,
     } = entry;
-    const label =
-      value === null
-        ? t('missingGroup')
-        : tag
-          ? `${t(value ? 'withTag' : 'withoutTag')}: ${tag}`
-          : typeof value === 'boolean'
-            ? t(value ? 'yes' : 'no')
-            : value;
+    let label: string;
+    if (value === null) label = t('missingGroup');
+    else if (group?.column === 'tags')
+      label = `${t(value ? 'withTag' : 'withoutTag')}: ${group.tag}`;
+    else if (group?.column === 'collections') {
+      label = `${t(value ? 'inCollection' : 'outsideCollection')}: ${group.collection}`;
+    } else label = typeof value === 'boolean' ? t(value ? 'yes' : 'no') : value;
     const line = element('tr', 'zb-group');
     const heading = element('td');
     heading.tabIndex = -1;
@@ -2912,7 +3069,7 @@ function mountWorkspaceSurface(
         cellValue(row, column, preferences.properties),
       );
       cell.tabIndex = -1;
-      const control = cell.querySelector<HTMLElement>('button, input');
+      const control = cell.querySelector<HTMLElement>('button:not(.zb-link-control), input');
       if (control) control.tabIndex = -1;
       line.append(cell);
     }
