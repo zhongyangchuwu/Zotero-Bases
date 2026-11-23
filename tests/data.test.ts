@@ -6,6 +6,59 @@ import type { Property } from '../src/contracts';
 
 type Item = Awaited<ReturnType<ZoteroData['Items']['getAll']>>[number];
 type Collection = ReturnType<ZoteroData['Collections']['getByLibrary']>[number];
+type ItemDataTypes = Parameters<ZoteroData['Items']['loadDataTypes']>[1];
+type NativeObserver = Parameters<ZoteroData['Notifier']['registerObserver']>[0];
+
+const journalArticle = 4;
+const book = 2;
+const software = 32;
+const conferencePaper = 33;
+const commonFields = [
+  'title',
+  'date',
+  'citationKey',
+  'DOI',
+  'url',
+  'shortTitle',
+  'rights',
+  'extra',
+];
+const archivedFields = ['archive', 'archiveLocation', 'callNumber'];
+const fieldsByType = new Map<number, readonly string[]>([
+  [
+    journalArticle,
+    [
+      ...commonFields,
+      ...archivedFields,
+      'publicationTitle',
+      'publisher',
+      'place',
+      'journalAbbreviation',
+      'volume',
+      'issue',
+      'pages',
+      'series',
+      'seriesTitle',
+      'language',
+      'accessDate',
+    ],
+  ],
+  [book, [...commonFields, ...archivedFields, 'publisher', 'edition', 'numPages', 'language']],
+  [software, [...commonFields, ...archivedFields, 'company', 'seriesTitle']],
+  [conferencePaper, [...commonFields, ...archivedFields, 'proceedingsTitle', 'publisher', 'pages']],
+]);
+const baseFieldsByType = new Map<number, Readonly<Record<string, string>>>([
+  [software, { publisher: 'company' }],
+  [conferencePaper, { publicationTitle: 'proceedingsTitle' }],
+]);
+const fieldNames = [...new Set([...fieldsByType.values()].flat())];
+const fieldIDs = new Map(fieldNames.map((name, index) => [name, index + 1]));
+
+function fieldName(field: string | number): string {
+  const name = typeof field === 'number' ? fieldNames[field - 1] : field;
+  if (!name || !fieldIDs.has(name)) throw new Error(`Unknown native field: ${field}`);
+  return name;
+}
 
 function nativeItem(
   id: number,
@@ -19,13 +72,26 @@ function nativeItem(
     parentID?: number;
     pdf?: boolean;
     regular?: boolean;
+    typeID?: number;
+    fields?: Readonly<Record<string, string>>;
+    collections?: readonly number[];
+    trashedCollections?: readonly number[];
+    notes?: readonly number[];
+    trashedNotes?: readonly number[];
     attachments?: readonly number[];
+    trashedAttachments?: readonly number[];
+    lastRead?: number;
     best?: Item;
   } = {},
 ) {
   let extra = initialExtra;
   let onDisk = initialExtra;
   let tags = [{ tag: 'automatic', type: 1 }];
+  const itemTypeID = flags.typeID ?? journalArticle;
+  const values: Readonly<Record<string, string>> = flags.fields ?? {
+    date: '2025-00-00 2025',
+    publicationTitle: 'Science',
+  };
   const item = {
     id,
     libraryID,
@@ -33,16 +99,28 @@ function nativeItem(
     deleted: flags.deleted ?? false,
     isFeedItem: flags.feed ?? false,
     dateAdded: '2026-05-24 20:52:26',
-    itemTypeID: 11,
+    dateModified: '2026-05-26 09:02:15',
+    attachmentLastRead: flags.lastRead ?? (flags.parentID ? null : undefined),
+    itemTypeID,
     isRegularItem: () => flags.regular ?? true,
     isEditable: () => !flags.readOnly,
     isPDFAttachment: () => flags.pdf ?? false,
-    getField: (field: string) => {
-      if (field === 'extra') return extra;
-      if (field === 'title') return `Item ${id}`;
-      if (field === 'year') return '2025';
-      if (field === 'publicationTitle') return 'Science';
-      return '';
+    getField(field: string | number, unformatted = false) {
+      const name = fieldName(field);
+      if (!fieldsByType.get(itemTypeID)?.includes(name))
+        throw new Error(`${name} is unsupported for item type ${itemTypeID}`);
+      if (name === 'extra') return extra;
+      if (name === 'title') return values[name] ?? `Item ${id}`;
+      const value = values[name] ?? '';
+      // Native getField formats multipart publication dates unless unformatted is true.
+      if (
+        name === 'date' &&
+        !unformatted &&
+        /^\d{4}-\d{2}-\d{2} /u.test(value) &&
+        !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?$/u.test(value)
+      )
+        return value.slice(11);
+      return value;
     },
     setField(_field: 'extra', value: string) {
       extra = value;
@@ -55,7 +133,21 @@ function nativeItem(
     removeTag(tag: string) {
       tags = tags.filter((entry) => entry.tag !== tag);
     },
-    getAttachments: () => flags.attachments ?? [],
+    getCollections: (includeTrashed: boolean) =>
+      includeTrashed
+        ? [...(flags.collections ?? []), ...(flags.trashedCollections ?? [])]
+        : (flags.collections ?? []),
+    getNotes: (includeTrashed: boolean) =>
+      includeTrashed
+        ? [...(flags.notes ?? []), ...(flags.trashedNotes ?? [])]
+        : (flags.notes ?? []),
+    getAttachments: (includeTrashed = false) =>
+      includeTrashed
+        ? [...(flags.attachments ?? []), ...(flags.trashedAttachments ?? [])]
+        : (flags.attachments ?? []),
+    getItemLastRead(): number | null {
+      return null;
+    },
     async getBestAttachment(): Promise<Item | false> {
       return flags.best ?? false;
     },
@@ -71,7 +163,29 @@ function nativeItem(
   return item;
 }
 
-function harness(items: readonly Item[] = [], collectionItems: readonly Item[] = []) {
+function nativeCollection(
+  id: number,
+  libraryID: number,
+  name: string,
+  deleted = false,
+): Collection {
+  return {
+    id,
+    libraryID,
+    name,
+    deleted,
+    key: `COL${id}`,
+    parentID: false,
+    loadDataType: async () => {},
+    getChildItems: () => [],
+  };
+}
+
+function harness(
+  items: readonly Item[] = [],
+  collectionItems: readonly Item[] = [],
+  additionalCollections: readonly Collection[] = [],
+) {
   const libraries = [
     {
       libraryID: 1,
@@ -125,9 +239,13 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
     getChildItems: () => collectionItems,
   };
   const root: Collection = { ...child, id: 14, key: 'ROOT0007', parentID: false, name: 'Root' };
+  const collections = [root, child, ...additionalCollections];
   const raw = new Map<string, string>();
   const prefObservers = new Map<symbol, { key: string; listener: () => void }>();
-  const nativeObservers = new Map<string, { observer: { notify(): void }; types: string[] }>();
+  const nativeObservers = new Map<
+    string,
+    { observer: NativeObserver; types: string[]; priority: number | undefined }
+  >();
   const prefs: Prefs = {
     get: (key) => raw.get(key),
     set(key, value) {
@@ -144,14 +262,39 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
     },
   };
   const byID = new Map(items.map((item) => [item.id, item]));
+  const cachedAttachments = new Map<number, Item>();
+  for (const item of new Set([...items, ...collectionItems])) {
+    if (!item.isRegularItem()) continue;
+    item.getItemLastRead = () => {
+      let max: number | null = null;
+      for (const id of item.getAttachments(false)) {
+        const attachment = cachedAttachments.get(id);
+        if (!attachment && byID.has(id)) throw new Error(`Attachment ${id} not loaded`);
+        const lastRead = attachment?.attachmentLastRead;
+        if (lastRead != null && (max === null || lastRead > max)) max = lastRead;
+      }
+      return max;
+    };
+  }
+  const getAsyncCalls: (number | readonly number[])[] = [];
   async function getAsync(id: number): Promise<Item | undefined>;
   async function getAsync(ids: readonly number[]): Promise<Item[]>;
   async function getAsync(id: number | readonly number[]) {
-    return typeof id === 'number' ? byID.get(id) : id.flatMap((id) => byID.get(id) ?? []);
+    getAsyncCalls.push(id);
+    if (typeof id === 'number') return byID.get(id);
+    const found = id.flatMap((id) => byID.get(id) ?? []);
+    for (const item of found) cachedAttachments.set(item.id, item);
+    return found;
   }
-  const loadDataTypes = vi.fn(async (_items: readonly Item[]) => {});
+  const loadDataTypes = vi.fn(async (_items: readonly Item[], _types: ItemDataTypes) => {});
+  const getByLibrary = vi.fn((id: number, _recursive: true, includeTrashed: false) =>
+    collections.filter(
+      (collection) => collection.libraryID === id && (includeTrashed || !collection.deleted),
+    ),
+  );
   const zotero: ZoteroData = {
     Libraries: {
+      userLibraryID: 1,
       getAll: () => libraries,
       get: (id) => libraries.find(({ libraryID }) => libraryID === id) ?? false,
     },
@@ -161,9 +304,9 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
       loadDataTypes,
     },
     Collections: {
-      getByLibrary: (id) => (id === 8 ? [root, child] : []),
+      getByLibrary,
       getByLibraryAndKeyAsync: async (id, key) =>
-        [root, child].find((collection) => collection.libraryID === id && collection.key === key) ??
+        collections.find((collection) => collection.libraryID === id && collection.key === key) ??
         false,
     },
     Tags: {
@@ -173,7 +316,17 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
         return [{ tag: id === 11 ? 'Feed only' : 'Other group' }];
       },
     },
-    ItemFields: { getAll: () => [{ name: 'newZoteroField' }] },
+    ItemFields: {
+      getAll: () => [...fieldNames, 'newZoteroField'].map((name) => ({ name })),
+      getID: (field) => fieldIDs.get(field) ?? false,
+      getFieldIDFromTypeAndBase(typeID, field) {
+        const name = fieldName(field);
+        const mapped = baseFieldsByType.get(typeID)?.[name] ?? name;
+        return fieldsByType.get(typeID)?.includes(mapped) ? (fieldIDs.get(mapped) ?? false) : false;
+      },
+      isValidForType: (field, typeID) =>
+        fieldsByType.get(typeID)?.includes(fieldName(field)) ?? false,
+    },
     ItemTypes: { getLocalizedString: () => 'Journal Article' },
     Utilities: {
       Internal: {
@@ -189,9 +342,9 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
       },
     },
     Notifier: {
-      registerObserver(observer, types) {
+      registerObserver(observer, types, _name, priority) {
         const id = String(nativeObservers.size);
-        nativeObservers.set(id, { observer, types });
+        nativeObservers.set(id, { observer, types, priority });
         return id;
       },
       unregisterObserver(id) {
@@ -213,8 +366,14 @@ function harness(items: readonly Item[] = [], collectionItems: readonly Item[] =
     prefs,
     libraries,
     loadDataTypes,
+    getAsyncCalls,
+    getByLibrary,
     prefObservers,
     nativeObservers,
+    emit(action: string, type: string, ids: readonly (string | number)[]) {
+      for (const { observer, types } of nativeObservers.values())
+        if (types.includes(type)) observer.notify(action, type, ids);
+    },
     host: createWorkspaceHost(zotero, prefs, owner),
   };
 }
@@ -245,7 +404,7 @@ describe('Zotero Bases host', () => {
     });
     expect(host.scopes().some(({ label }) => label === 'Feed')).toBe(false);
     const catalog = await host.load('group:73/CHILD007');
-    expect(catalog).toEqual({
+    expect(catalog).toMatchObject({
       rows: [
         {
           id: 1,
@@ -267,6 +426,230 @@ describe('Zotero Bases host', () => {
       [1, true],
       [4, false],
     ]);
+  });
+
+  it('loads 322 Zotero rows in batches with type-valid bibliographic fields and cached child metadata', async () => {
+    const recent = Date.UTC(2026, 4, 28, 12, 30) / 1_000;
+    const pdf = nativeItem(500, 1, '', {
+      parentID: 1,
+      pdf: true,
+      regular: false,
+      lastRead: recent,
+    });
+    const snapshot = nativeItem(501, 1, '', { parentID: 1, regular: false, lastRead: recent - 60 });
+    const trashedPDF = nativeItem(502, 1, '', {
+      parentID: 1,
+      regular: false,
+      deleted: true,
+      pdf: true,
+      lastRead: recent + 60,
+    });
+    const paper = nativeItem(1, 1, '', {
+      collections: [21, 22, 23],
+      trashedCollections: [24],
+      notes: [601, 602],
+      trashedNotes: [603],
+      attachments: [500, 501],
+      trashedAttachments: [502],
+      fields: {
+        citationKey: 'lovelaceNotes2025',
+        publicationTitle: 'Journal of Computing',
+        date: '2025-00-00 Spring 2025',
+        DOI: '10.1234/notes',
+        url: 'https://example.org/article',
+        journalAbbreviation: 'J. Comput.',
+        publisher: 'Example Press',
+        shortTitle: 'Notes',
+        volume: '12',
+        issue: '3',
+        pages: '123–130',
+        language: 'en',
+        series: 'Computing',
+        seriesTitle: 'Computing History',
+        callNumber: 'QA76',
+        place: 'London',
+        accessDate: '2026-05-20 11:30:12',
+        archive: 'Example Archive',
+        archiveLocation: 'Box 7',
+        rights: 'CC BY 4.0',
+      },
+    });
+    const volume = nativeItem(2, 1, '', {
+      typeID: book,
+      fields: { date: '0000-00-00 in press', edition: '2nd', numPages: '260', publisher: 'Books' },
+    });
+    const program = nativeItem(3, 8, '', {
+      typeID: software,
+      collections: [15],
+      fields: { company: 'Software Press', seriesTitle: 'Tools' },
+    });
+    const proceedings = nativeItem(4, 8, '', {
+      typeID: conferencePaper,
+      fields: { proceedingsTitle: 'Computing Conference', publisher: 'Society' },
+    });
+    const ordinary = Array.from({ length: 318 }, (_, index) =>
+      nativeItem(10 + index, index % 2 ? 8 : 1),
+    );
+    const candidates = [paper, volume, program, proceedings, ...ordinary];
+    const { host, loadDataTypes, getAsyncCalls, getByLibrary } = harness(
+      [...candidates, pdf, snapshot, trashedPDF],
+      [],
+      [
+        nativeCollection(21, 1, 'Zeta'),
+        nativeCollection(22, 1, 'Alpha'),
+        nativeCollection(23, 1, 'Alpha'),
+        nativeCollection(24, 1, 'Trashed', true),
+        nativeCollection(25, 1, 'Empty Collection'),
+      ],
+    );
+    const loaded = new Set<ItemDataTypes[number]>();
+    loadDataTypes.mockImplementation(async (items, types) => {
+      if (items.includes(paper)) for (const type of types) loaded.add(type);
+    });
+    const getNotes = paper.getNotes;
+    vi.spyOn(paper, 'getNotes').mockImplementation((includeTrashed) => {
+      if (!loaded.has('childItems')) throw new Error('Child items not loaded');
+      return getNotes(includeTrashed);
+    });
+    const getCollections = paper.getCollections;
+    vi.spyOn(paper, 'getCollections').mockImplementation((includeTrashed) => {
+      if (!loaded.has('collections')) throw new Error('Collections not loaded');
+      return getCollections(includeTrashed);
+    });
+    const getField = paper.getField;
+    vi.spyOn(paper, 'getField').mockImplementation((field, unformatted) => {
+      if (!loaded.has('itemData')) throw new Error('Item fields not loaded');
+      return getField(field, unformatted);
+    });
+
+    const catalog = await host.load('all');
+    expect(catalog.rows).toHaveLength(322);
+    expect(new Set(catalog.rows.map(({ id }) => id)).size).toBe(322);
+    expect(loadDataTypes).toHaveBeenCalledTimes(1);
+    expect(loadDataTypes.mock.calls[0]?.[0]).toHaveLength(candidates.length);
+    expect(loaded).toEqual(new Set(['itemData', 'creators', 'tags', 'childItems', 'collections']));
+    expect(getAsyncCalls).toEqual([[500, 501]]);
+    expect(getByLibrary.mock.calls).toEqual([
+      [1, true, false],
+      [8, true, false],
+    ]);
+    expect(catalog.collections).toEqual(
+      new Set(['Alpha', 'Zeta', 'Child', 'Root', 'Empty Collection']),
+    );
+    const rows = new Map(catalog.rows.map((row) => [row.id, row]));
+    expect(rows.get(paper.id)).toMatchObject({
+      citationKey: 'lovelaceNotes2025',
+      source: 'Journal of Computing',
+      year: '2025',
+      date: '2025-00-00 Spring 2025',
+      dateModified: '2026-05-26 09:02:15',
+      lastRead: '2026-05-28T12:30:00.000Z',
+      collections: ['Alpha', 'Zeta'],
+      notesCount: '2',
+      attachmentsCount: '2',
+      pdf: true,
+      doi: '10.1234/notes',
+      url: 'https://example.org/article',
+      journalAbbreviation: 'J. Comput.',
+      publisher: 'Example Press',
+      shortTitle: 'Notes',
+      volume: '12',
+      issue: '3',
+      pages: '123–130',
+      language: 'en',
+      series: 'Computing',
+      seriesTitle: 'Computing History',
+      callNumber: 'QA76',
+      place: 'London',
+      accessDate: '2026-05-20 11:30:12',
+      archive: 'Example Archive',
+      archiveLocation: 'Box 7',
+      rights: 'CC BY 4.0',
+    });
+    expect(rows.get(volume.id)).toMatchObject({
+      source: 'Books',
+      date: '0000-00-00 in press',
+      year: '',
+      edition: '2nd',
+      journalAbbreviation: '',
+      seriesTitle: '',
+      pages: '',
+      notesCount: '0',
+      attachmentsCount: '0',
+      lastRead: '',
+      collections: [],
+    });
+    expect(rows.get(program.id)).toMatchObject({
+      publisher: 'Software Press',
+      source: 'Software Press',
+      seriesTitle: 'Tools',
+      accessDate: '',
+      language: '',
+      doi: '',
+      date: '',
+      collections: ['Child'],
+    });
+    expect(rows.get(proceedings.id)?.source).toBe('Computing Conference');
+  });
+
+  it('leaves unknown host fields blank without calling getField or base mapping for them', async () => {
+    const item = nativeItem(1, 1, '', { fields: { publisher: 'Press' } });
+    const { host, zotero } = harness([item]);
+    const getID = zotero.ItemFields.getID;
+    const getField = item.getField;
+    vi.spyOn(zotero.ItemFields, 'getID').mockImplementation((field) =>
+      field === 'publisher' ? false : getID(field),
+    );
+    vi.spyOn(item, 'getField').mockImplementation((field, unformatted) => {
+      if (fieldName(field) === 'publisher') throw new Error('Field absent from host schema');
+      return getField(field, unformatted);
+    });
+    expect((await host.load('user')).rows[0]).toMatchObject({ publisher: '', source: '' });
+  });
+
+  it('invalidates memberships and changed last-read timestamps after the native read observer', async () => {
+    const memberships: number[] = [];
+    const pdf = nativeItem(2, 8, '', { parentID: 1, pdf: true, regular: false });
+    const paper = nativeItem(1, 8, '', { attachments: [2], collections: memberships });
+    const { host, emit, nativeObservers, getAsyncCalls } = harness([paper, pdf]);
+    expect((await host.load('group:73')).rows[0]).toMatchObject({ collections: [], lastRead: '' });
+
+    const listener = vi.fn();
+    const stop = host.subscribe(listener);
+    expect([...nativeObservers.values()][0]?.priority).toBeGreaterThan(100);
+
+    memberships.push(15);
+    emit('add', 'collection-item', ['15-1']);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('data');
+    expect((await host.load('group:73')).rows[0]?.collections).toEqual(['Child']);
+
+    listener.mockClear();
+    getAsyncCalls.length = 0;
+    emit('pageChange', 'file', [pdf.id]);
+    emit('modify', 'setting', ['1/lastRead_u_ABCD1234', '8/lastRead_g73_ABCD1234', '1/color']);
+    pdf.attachmentLastRead = Date.UTC(2026, 4, 28, 12, 30) / 1_000;
+    emit('modify', 'file', [pdf.id]);
+    expect(listener).not.toHaveBeenCalled();
+
+    emit('open', 'file', [pdf.id]);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('data');
+    expect(getAsyncCalls).toEqual([]);
+    expect((await host.load('group:73')).rows[0]?.lastRead).toBe('2026-05-28T12:30:00.000Z');
+
+    listener.mockClear();
+    emit('pageChange', 'file', [pdf.id]);
+    expect(listener).not.toHaveBeenCalled();
+    pdf.attachmentLastRead += 5 * 60;
+    emit('pageChange', 'file', [pdf.id]);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('data');
+    expect((await host.load('group:73')).rows[0]?.lastRead).toBe('2026-05-28T12:35:00.000Z');
+
+    listener.mockClear();
+    pdf.attachmentLastRead = null;
+    emit('delete', 'setting', ['1/lastRead_g73_ABCD1234']);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('data');
+    expect((await host.load('group:73')).rows[0]?.lastRead).toBe('');
+    stop();
   });
 
   it('writes literal Extra using the latest schema, preserves unrelated data and never authorizes a reserved key', async () => {
@@ -431,7 +814,7 @@ describe('Zotero Bases host', () => {
   it('coalesces data notifications across hosts during bulk while retaining per-item saves', async () => {
     const first = nativeItem(1, 1);
     const second = nativeItem(2, 1);
-    const { host, zotero, prefs, owner, nativeObservers } = harness([first, second]);
+    const { host, zotero, prefs, owner, emit } = harness([first, second]);
     const other = createWorkspaceHost(zotero, prefs, owner);
     const listener = vi.fn();
     const otherListener = vi.fn();
@@ -439,7 +822,7 @@ describe('Zotero Bases host', () => {
     const stopOther = other.subscribe(otherListener);
     for (const item of [first, second]) {
       item.saveTx.mockImplementation(async () => {
-        for (const { observer } of nativeObservers.values()) observer.notify();
+        emit('modify', 'item', [item.id]);
       });
     }
     await host.bulk([1, 2], { kind: 'tag', tag: 'new', add: true });
@@ -661,7 +1044,7 @@ describe('Zotero Bases host', () => {
     expect(entry.types).toEqual(
       expect.arrayContaining(['item', 'tag', 'collection', 'item-tag', 'collection-item']),
     );
-    entry.observer.notify();
+    entry.observer.notify('modify', 'item', [1]);
     const settings = host.settings();
     await host.change({
       kind: 'views',
@@ -672,7 +1055,7 @@ describe('Zotero Bases host', () => {
     expect(listener.mock.calls).toEqual([['data'], ['settings']]);
     unsubscribe();
     unsubscribe();
-    entry.observer.notify();
+    entry.observer.notify('modify', 'item', [1]);
     prefs.set(VIEWS_PREF, '{}', true);
     expect(listener).toHaveBeenCalledTimes(2);
     expect(nativeObservers.size).toBe(0);

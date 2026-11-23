@@ -104,4 +104,70 @@ describe('groupRows', () => {
       groupRows(rows, { column: 'property:Removed', direction: 'asc' }, properties, tags, 'en'),
     ).toBeUndefined();
   });
+
+  it('groups native dates by the known month and preserves sorted row order inside buckets', () => {
+    const rows = [
+      row(1, { date: '2024-02-18T23:50:00-02:00' }),
+      row(2, { date: '2024-01-18 10:00:00' }),
+      row(3, { date: '2024-02-00 February 2024' }),
+      row(4, { date: '2024-00-00 2024' }),
+      row(5, { date: '2024-02-29 February 29th, 2024' }),
+      row(6, { date: '2024-02-30' }),
+      row(7, { date: '2024-03' }),
+      row(8, {}),
+      row(9, { date: '2024-03-01T00:15:00+02:00' }),
+    ];
+    const asc = groupRows(rows, { column: 'date', direction: 'asc' }, properties, tags, 'en');
+    expect(asc).toEqual([
+      { value: '2024-01', rows: [rows[1]] },
+      { value: '2024-02', rows: [rows[0], rows[2], rows[4]] },
+      { value: '2024-03', rows: [rows[6], rows[8]] },
+      { value: null, rows: [rows[3], rows[5], rows[7]] },
+    ]);
+    const desc = groupRows(rows, { column: 'date', direction: 'desc' }, properties, tags, 'en');
+    expect(desc?.map(({ value }) => value)).toEqual(['2024-03', '2024-02', '2024-01', null]);
+  });
+
+  it('groups numeric native values including zero without grouping unsupported native columns', () => {
+    const rows = [
+      row(1, { notesCount: '10' }),
+      row(2, {}),
+      row(3, { notesCount: '0' }),
+      row(4, { notesCount: '2' }),
+    ];
+    const grouped = groupRows(
+      rows,
+      { column: 'notesCount', direction: 'asc' },
+      properties,
+      tags,
+      'en',
+    );
+    expect(grouped?.map(({ value }) => value)).toEqual(['0', '2', '10', null]);
+    expect(
+      groupRows(rows, { column: 'title', direction: 'asc' }, properties, tags, 'en'),
+    ).toBeUndefined();
+  });
+
+  it('partitions multiple collection memberships into one row per item for the selected name', () => {
+    const rows = [
+      row(1, { collections: ['Other', 'Reading'] }),
+      row(2, { collections: ['Other', 'reading'] }),
+      row(3, { collections: [] }),
+      row(4, {}),
+      row(5, { collections: ['Reading'] }),
+    ];
+    const collections = new Set(['Reading', 'Other', 'Elsewhere']);
+    const group = { column: 'collections', collection: 'Reading', direction: 'desc' } as const;
+    expect(groupRows(rows, group, properties, tags, 'en', collections)).toEqual([
+      { value: true, rows: [rows[0], rows[4]] },
+      { value: false, rows: [rows[1], rows[2], rows[3]] },
+    ]);
+    expect(
+      groupRows(rows, { ...group, collection: 'Elsewhere' }, properties, tags, 'en', collections),
+    ).toEqual([{ value: false, rows }]);
+    expect(
+      groupRows(rows, { ...group, collection: 'Missing' }, properties, tags, 'en', collections),
+    ).toBeUndefined();
+    expect(groupRows(rows, group, properties, tags, 'en')).toBeUndefined();
+  });
 });

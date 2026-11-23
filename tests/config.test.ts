@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createConfig, decodeSyncSnapshot, SCHEMA_PREF, VIEWS_PREF } from '../src/config';
 import type { Prefs } from '../src/data';
+import { DEFAULT_COLUMNS } from '../src/contracts';
 import type { View } from '../src/contracts';
 import { validateProperty } from '../src/extra';
 
@@ -47,6 +48,17 @@ describe('Zotero Bases configuration', () => {
       active: 'default',
       views: [{ id: 'default', scope, sorts: [{ column: 'title', direction: 'asc' }] }],
     });
+    expect(first.views[0]!.columns).toEqual(DEFAULT_COLUMNS);
+    expect(DEFAULT_COLUMNS).toEqual([
+      'title',
+      'creators',
+      'year',
+      'source',
+      'type',
+      'tags',
+      'pdf',
+      'added',
+    ]);
     expect([...raw.keys()]).toEqual([VIEWS_PREF]);
     expect(createConfig(prefs, () => 'user', validateProperty).settings()).toEqual(first);
   });
@@ -136,7 +148,6 @@ describe('Zotero Bases configuration', () => {
       { density: 'spacious', columnWidths: { title: 100 } },
       { density: 'comfortable', columnWidths: { title: 47 } },
       { columnWidths: { title: 1601 } },
-      { columnWidths: { unknown: 100 } },
       { columnWidths: { title: '100' } },
       { columnWidths: null },
     ];
@@ -155,6 +166,81 @@ describe('Zotero Bases configuration', () => {
       );
       expect(decodeSyncSnapshot({ schema: [], views: [saved] }, validateProperty)).toBeUndefined();
     }
+  });
+
+  it('drops unknown native keys while preserving known rules, stale properties and order', () => {
+    const { prefs, raw } = preferences();
+    const saved = {
+      ...secondView,
+      columns: ['futureColumn', 'doi', 'property:Removed', 'title'],
+      sorts: [
+        { column: 'futureColumn', direction: 'asc' },
+        { column: 'dateModified', direction: 'desc' },
+        { column: 'property:Removed', direction: 'asc' },
+      ],
+      filters: [
+        { column: 'futureColumn', operator: 'equals', value: 'x' },
+        { column: 'collections', operator: 'notContains', value: 'Reading' },
+        { column: 'notesCount', operator: 'gt', value: '0' },
+        { column: 'property:Removed', operator: 'notEquals', value: 'Done' },
+      ],
+      group: { column: 'futureColumn', direction: 'asc' },
+      columnWidths: { futureColumn: 1, doi: 300, 'property:Removed': 160 },
+    };
+    const expected = {
+      ...saved,
+      columns: ['doi', 'property:Removed', 'title'],
+      sorts: saved.sorts.slice(1),
+      filters: saved.filters.slice(1),
+      columnWidths: { doi: 300, 'property:Removed': 160 },
+    };
+    const { group: _group, ...withoutGroup } = expected;
+    raw.set(VIEWS_PREF, JSON.stringify({ views: [saved], active: saved.id }));
+    expect(createConfig(prefs, () => 'user', validateProperty).settings().views).toEqual([
+      withoutGroup,
+    ]);
+    expect(decodeSyncSnapshot({ schema: [], views: [saved] }, validateProperty)).toEqual({
+      schema: [],
+      views: [withoutGroup],
+    });
+    const onlyUnknown = { ...saved, columns: ['futureColumn'] };
+    expect(
+      decodeSyncSnapshot({ schema: [], views: [onlyUnknown] }, validateProperty)?.views[0]?.columns,
+    ).toEqual(DEFAULT_COLUMNS);
+    expect(
+      decodeSyncSnapshot({ schema: [], views: [{ ...saved, columns: [] }] }, validateProperty)
+        ?.views[0]?.columns,
+    ).toEqual([]);
+  });
+
+  it('keeps collection and date groupings and rejects malformed portable values', () => {
+    const decode = (view: unknown) =>
+      decodeSyncSnapshot({ schema: [], views: [view] }, validateProperty);
+    for (const group of [
+      { column: 'collections', collection: 'Reading', direction: 'desc' },
+      { column: 'dateModified', direction: 'asc' },
+      { column: 'lastRead', direction: 'desc' },
+      { column: 'tags', tag: 'Read', direction: 'asc' },
+    ]) {
+      expect(decode({ ...secondView, group })?.views[0]?.group).toEqual(group);
+    }
+    for (const bad of [
+      { columns: ['title', 1] },
+      { columns: ['property:'] },
+      { filters: [{ column: 'futureColumn', operator: 'equals', value: 1 }] },
+      { filters: [{ column: 'futureColumn', operator: 'invalid', value: 'x' }] },
+      { group: { column: 'futureColumn', direction: 'sideways' } },
+      { group: { column: 'collections', collection: ' ', direction: 'asc' } },
+      { columnWidths: { futureColumn: '100' } },
+      { columnWidths: { doi: 47 } },
+    ])
+      expect(decode({ ...secondView, ...bad })).toBeUndefined();
+    expect(
+      decode({
+        ...secondView,
+        sorts: [{ column: 'futureColumn', direction: 'asc' }, { column: 'doi' }],
+      })?.views[0]?.sorts,
+    ).toEqual([]);
   });
 
   it('writes only the independent versioned JSON keys and preserves stale filters for workspace warnings', () => {

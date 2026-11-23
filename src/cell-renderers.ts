@@ -1,8 +1,20 @@
-import type { Column, NativeColumn, Property, PropertyType, PropertyValue, Row } from './contracts';
+import {
+  NATIVE_COLUMN_BY_KEY,
+  isNativeColumn,
+  type Column,
+  type NativeColumn,
+  type NativeValueType,
+  type Property,
+  type PropertyType,
+  type PropertyValue,
+  type Row,
+} from './contracts';
 import type { GlobalPreferences } from './global-preferences';
+import { dateDay } from './query';
 
 export interface CellActions {
   open(row: Row, pdf: boolean): void;
+  linkActions?: { open(url: string): void; copy(text: string): void };
   authorFormat?: () => GlobalPreferences['authorFormat'];
   toggle(row: Row, property: Property, checked: boolean): void;
   edit(
@@ -15,7 +27,17 @@ export interface CellActions {
   ): void;
   columnName(column: Column): string;
   text(
-    key: 'yes' | 'no' | 'locate' | 'open' | 'openPDF' | 'readOnly' | 'edit' | 'untitled',
+    key:
+      | 'yes'
+      | 'no'
+      | 'locate'
+      | 'open'
+      | 'openPDF'
+      | 'openLink'
+      | 'copyDOI'
+      | 'readOnly'
+      | 'edit'
+      | 'untitled',
   ): string;
 }
 
@@ -137,6 +159,55 @@ function fitPills(table: HTMLTableElement): void {
   }
 }
 
+function webURL(value: string): URL | undefined {
+  const input = value.trim();
+  // Do not let WHATWG recovery turn missing slashes, backslashes, or an empty host into a link.
+  const authority = /^https?:\/\/([^/?#\\\s]+)/iu.exec(input)?.[1];
+  if (!authority || authority.includes('@') || /[\r\n\t\\]/u.test(input)) return;
+  try {
+    const url = new URL(input);
+    if (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      url.hostname &&
+      !url.username &&
+      !url.password
+    )
+      return url;
+  } catch {
+    // An invalid field remains plain text.
+  }
+}
+
+function doiLink(value: string): { doi: string; url: string } | undefined {
+  let doi = value.trim().replace(/^(?:info:)?doi:\s*/iu, '');
+  try {
+    if (/^https?:/iu.test(doi)) {
+      const resolver = webURL(doi);
+      if (
+        !resolver ||
+        resolver.port ||
+        (resolver.hostname !== 'doi.org' && resolver.hostname !== 'dx.doi.org')
+      )
+        return;
+      doi = decodeURIComponent(resolver.pathname.slice(1));
+    }
+    if (!/^10\.\d+(?:\.\d+)*\/\S+$/u.test(doi)) return;
+    // DOI resolver path: encode URL delimiters and stop dot segments being normalized away.
+    const path = encodeURIComponent(doi)
+      .replace(/%2F/gu, '/')
+      .replace(/\/(?=\.{1,2}(?:\/|$))/gu, '%2F');
+    return { doi, url: `https://doi.org/${path}` };
+  } catch {
+    // Malformed percent escapes or invalid Unicode cannot yield a resolver URL.
+  }
+}
+
+function publicationDate(value: string): string {
+  // Zotero stores a sortable prefix before the original date text. SQL times are not multipart.
+  const original = /^\d{4}-(?:0\d|1[0-2])-(?:[0-2]\d|3[01]) (.+)$/su.exec(value)?.[1];
+  return original && !/^\d{1,2}:\d{2}/u.test(original) ? original : value;
+}
+
 export function createCellRenderers(document: Document, actions: CellActions) {
   function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -212,10 +283,21 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       content.textContent = fullText;
       return;
     }
-    const strip = element('span', 'zb-cell-pills');
+    const strip = pillStrip(pills, property);
     if (!row.writable) strip.title = `${fullText} · ${cell.title}`;
+    content.append(strip);
+  }
+
+  function pillStrip(
+    pills: readonly string[],
+    property?: Property,
+    fullTitle?: string,
+  ): HTMLElement {
+    const strip = element('span', 'zb-cell-pills');
+    if (fullTitle) strip.title = fullTitle;
     for (const label of pills) {
       const pill = element('span', 'zb-cell-pill', label);
+      if (fullTitle) pill.title = label;
       if (property) {
         const colors = property.optionColors;
         pill.dataset.tone =
@@ -226,9 +308,10 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       strip.append(pill);
     }
     const more = element('span', 'zb-cell-pill zb-cell-pill-more');
+    if (fullTitle) more.title = fullTitle;
     more.hidden = true;
     strip.append(more);
-    content.append(strip);
+    return strip;
   }
 
   function editList(context: Cell, property?: Property): void {
@@ -236,7 +319,7 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     editable(context, property, value !== null && typeof value === 'object' ? value : undefined);
   }
 
-  const native: Record<NativeColumn, (context: Cell) => void> = {
+  const native: Partial<Record<NativeColumn, (context: Cell) => void>> = {
     title(context) {
       const title = button(context, () => actions.open(context.row, false), 'zb-item-title');
       title.textContent = rowName(context.row);
@@ -267,11 +350,6 @@ export function createCellRenderers(document: Document, actions: CellActions) {
           : valueText(full);
       cell.title = full;
     },
-    year(context) {
-      context.cell.classList.add('zb-cell-number');
-      plain(context);
-    },
-    source: plain,
     type({ cell, value }) {
       if (typeof value === 'string' && value) cell.append(element('span', 'zb-type-badge', value));
       else cell.textContent = valueText(value);
@@ -287,12 +365,72 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       pdf.append(mark);
       context.cell.append(pdf);
     },
-    added(context) {
-      const { cell, value } = context;
-      if (typeof value !== 'string' || !value) return plain(context);
-      cell.textContent = /^\d{4}-\d{2}-\d{2}(?=$|[ T])/u.exec(value)?.[0] ?? value;
-      cell.title = value;
-    },
+  };
+
+  function nativeNumber(context: Cell): void {
+    const { cell, column, value } = context;
+    cell.classList.add('zb-cell-number');
+    if (value === '0' && (column === 'notesCount' || column === 'attachmentsCount')) return;
+    plain(context);
+  }
+
+  function nativeDate({ cell, column, value }: Cell): void {
+    if (typeof value !== 'string') return;
+    cell.classList.add('zb-cell-date');
+    cell.textContent = (column === 'date' ? undefined : dateDay(value)) ?? publicationDate(value);
+    cell.title = value;
+  }
+
+  function nativeList({ cell, value }: Cell): void {
+    if (value === null || typeof value !== 'object' || !value.length) return;
+    cell.classList.add('zb-cell-collections');
+    cell.append(pillStrip(value, undefined, value.join('; ')));
+  }
+
+  function linkButton(
+    style: string,
+    text: string,
+    label: string,
+    run: () => void,
+  ): HTMLButtonElement {
+    const node = element('button', `zb-link-control ${style}`, text);
+    node.type = 'button';
+    node.tabIndex = -1;
+    named(node, label);
+    node.addEventListener('click', run);
+    node.addEventListener('dblclick', (event) => event.stopPropagation());
+    return node;
+  }
+
+  function nativeLink(context: Cell): void {
+    const { cell, column, value } = context;
+    const linkActions = actions.linkActions;
+    if (typeof value !== 'string' || !value || !linkActions) return plain(context);
+    const doi = column === 'doi' ? doiLink(value) : undefined;
+    const url = column === 'doi' ? doi?.url : webURL(value)?.href;
+    if (!url) return plain(context);
+    const text = doi?.doi ?? value;
+    const open = linkButton('zb-link-open', text, `${actions.text('openLink')} · ${text}`, () =>
+      linkActions.open(url),
+    );
+    control(open, context);
+    cell.append(open);
+    if (doi) {
+      cell.append(
+        linkButton('zb-link-copy', '⧉', `${actions.text('copyDOI')} · ${doi.doi}`, () =>
+          linkActions.copy(doi.doi),
+        ),
+      );
+    }
+  }
+
+  const byType: Record<NativeValueType, (context: Cell) => void> = {
+    text: plain,
+    number: nativeNumber,
+    date: nativeDate,
+    link: nativeLink,
+    multi: nativeList,
+    boolean: plain,
   };
 
   const custom: Record<PropertyType, (context: Cell, property: Property) => void> = {
@@ -333,12 +471,12 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     const cell = element('td');
     cell.dataset.column = column;
     const context: Cell = { row, column, value, cell };
-    if (column.startsWith('property:')) {
-      if (property) custom[property.type](context, property);
-      else plain(context);
-    } else {
-      native[column as NativeColumn](context);
-    }
+    if (isNativeColumn(column)) {
+      if (column === 'citationKey') cell.classList.add('zb-cell-monospace');
+      const draw = native[column] ?? byType[NATIVE_COLUMN_BY_KEY[column].valueType];
+      draw(context);
+    } else if (property) custom[property.type](context, property);
+    else plain(context);
     return cell;
   }
 

@@ -14,9 +14,14 @@ function snapshot(name: string): SyncSnapshot {
         id: 'reading',
         name,
         scope: 'user',
-        columns: ['title', 'property:Reading Stage'],
+        columns: ['title', 'doi', 'collections', 'notesCount', 'property:Reading Stage'],
         sorts: [{ column: 'title', direction: 'asc' }],
-        filters: [],
+        filters: [
+          { column: 'collections', operator: 'notContains', value: 'Archive' },
+          { column: 'notesCount', operator: 'lt', value: '5' },
+        ],
+        group: { column: 'collections', collection: 'Reading', direction: 'asc' },
+        columnWidths: { doi: 240, collections: 200, notesCount: 90 },
       },
     ],
   };
@@ -273,6 +278,33 @@ describe('private Bases sync', () => {
       parents: [remote],
       snapshot: snapshot('On this device'),
     });
+  });
+
+  it('pulls older records with unknown native keys without dropping recognized settings', async () => {
+    const { store, transport } = library();
+    const owner = profile(transport, snapshot('Local'));
+    const sync = owner.start();
+    await sync.enable();
+    const known = snapshot('Cloud');
+    const view = known.views[0]!;
+    store.add(
+      {
+        ...known,
+        views: [
+          {
+            ...view,
+            columns: ['futureColumn', ...view.columns],
+            sorts: [{ column: 'futureColumn', direction: 'asc' }, ...view.sorts],
+            filters: [{ column: 'futureColumn', operator: 'equals', value: 'x' }, ...view.filters],
+            columnWidths: { futureColumn: 120, ...view.columnWidths },
+          },
+        ],
+      },
+      [store.files[0]!.id],
+    );
+    await sync.syncNow();
+    await sync.resolve('cloud');
+    expect(owner.state.value).toEqual(known);
   });
 
   it('compares legacy heads and baselines without rewriting them, and keeps their IDs as parents', async () => {

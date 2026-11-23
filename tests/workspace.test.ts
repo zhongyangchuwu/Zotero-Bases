@@ -96,6 +96,7 @@ function fixture(rows: readonly Row[] = [sample], view: View = defaultView) {
       async (_scope: string): Promise<Catalog> => ({
         rows: entries,
         tags: new Set(['existing', ...entries.flatMap(({ tags }) => tags)]),
+        collections: new Set(entries.flatMap(({ collections }) => collections ?? [])),
       }),
     ),
     change: vi.fn(async (change: ConfigChange): Promise<MutationResult> => {
@@ -372,6 +373,102 @@ describe('Zotero Bases workspace', () => {
         (control) => control.textContent === 'Hide this column',
       )?.disabled,
     ).toBe(true);
+  });
+
+  it('finds English, Chinese and key matches, expands only matching column groups, and clears before closing', async () => {
+    const { host } = fixture([sample], { ...defaultView, columns: ['title'] });
+    const { root, teardown } = attach(host);
+    await settle();
+    openTool(root, 'Columns');
+    const search = get<HTMLInputElement>(root, 'input[aria-label="Search columns"]');
+    const more = () => get(root, '[data-column-group="more"] [aria-expanded]');
+    expect(document.activeElement).toBe(search);
+    expect(more().getAttribute('aria-expanded')).toBe('false');
+    more().click();
+    expect(get(root, '[data-column-group="more"] > .zb-pane-list').hidden).toBe(false);
+    type(search, '页码');
+    expect(get(root, '[data-column-group="more"] > .zb-pane-list').hidden).toBe(false);
+    expect(root.querySelector('[data-column-group="common"]')).toBeNull();
+    get<HTMLInputElement>(root, 'input[data-focus="pages"]').click();
+    type(search, 'Language');
+    expect(root.querySelector('input[data-focus="language"]')).not.toBeNull();
+    expect(root.querySelector('input[data-focus="pages"]')).toBeNull();
+    type(search, 'seriesTitle');
+    expect(root.querySelector('input[data-focus="seriesTitle"]')).not.toBeNull();
+    expect(root.querySelector('input[data-focus="pages"]')).toBeNull();
+    expect(key(search, 'Escape')).toBe(false);
+    expect(search.value).toBe('');
+    expect(more().getAttribute('aria-expanded')).toBe('false');
+    expect(key(search, 'Escape')).toBe(false);
+    expect(document.activeElement).toBe(get(root, 'button[title="Columns"]'));
+    teardown();
+    const remount = attach(host).root;
+    await settle();
+    expect(cell(remount, 'pages')).toBeDefined();
+  });
+
+  it('uses registry choices in collection filters and groups native dates by month', async () => {
+    const { host } = fixture(
+      [
+        { ...sample, collections: ['Methods', 'Review'], lastRead: '2025-04-02T10:00:00Z' },
+        {
+          ...sample,
+          id: 2,
+          title: 'Beta',
+          collections: ['Review'],
+          lastRead: '2025-04-19T10:00:00Z',
+        },
+        { ...sample, id: 3, title: 'Gamma', collections: ['Methods'] },
+      ],
+      { ...defaultView, columns: ['title', 'lastRead'] },
+    );
+    const { root } = attach(host);
+    await settle();
+    openTool(root, 'Filters');
+    click(root, 'Add condition');
+    changeSelection(root, 'Filter field · 1', 'collections');
+    changeSelection(root, 'Filter condition · 1', 'contains');
+    changeSelection(root, 'Filter value · 1', 'Methods');
+    expect(rowIds(root)).toEqual([1, 3]);
+    openTool(root, 'Grouping');
+    changeSelection(root, 'Group by', 'lastRead');
+    expect(groupTitles(root)).toEqual(['2025-04 (1)', 'No value (1)']);
+    changeSelection(root, 'Group by', 'collections');
+    changeSelection(root, 'Collection to group by', 'Review');
+    expect(groupTitles(root)).toEqual([
+      'Not in collection: Review (1)',
+      'In collection: Review (1)',
+    ]);
+    expect(rowIds(root)).toEqual([3, 1]);
+    expect(host.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects a link cell as usual and only opens or copies through its explicit buttons', async () => {
+    const open = vi.fn();
+    const copy = vi.fn();
+    const { host } = fixture([{ ...sample, doi: '10.1000/fixture' }], {
+      ...defaultView,
+      columns: ['title', 'doi'],
+    });
+    const { root } = attach(host, { language: 'en', linkActions: { open, copy } });
+    await settle();
+    const doi = cell(root, 'doi');
+    doi.click();
+    expect(document.activeElement).toBe(doi);
+    expect(doi.hasAttribute('data-active-cell')).toBe(true);
+    key(doi, 'Enter');
+    key(doi, 'i');
+    expect(open).not.toHaveBeenCalled();
+    expect(copy).not.toHaveBeenCalled();
+    const links = [...doi.querySelectorAll<HTMLButtonElement>('.zb-link-control')];
+    expect(links.map(({ tabIndex }) => tabIndex)).toEqual([0, 0]);
+    doi.querySelector<HTMLButtonElement>('.zb-link-control[aria-label^="Copy DOI"]')!.click();
+    expect(copy).toHaveBeenCalledExactlyOnceWith('10.1000/fixture');
+    doi
+      .querySelector<HTMLButtonElement>('.zb-link-control[aria-label^="Open external link"]')!
+      .click();
+    expect(open).toHaveBeenCalledExactlyOnceWith('https://doi.org/10.1000/fixture');
+    expect(host.openItem).not.toHaveBeenCalled();
   });
 
   it('drags headers across an insertion boundary without opening the column menu', async () => {
@@ -1021,14 +1118,21 @@ describe('Zotero Bases workspace', () => {
     await settle();
     openTool(root, 'Grouping');
     const grouping = get<HTMLSelectElement>(root, 'select[aria-label="Group by"]');
-    expect(Array.from(grouping.options, ({ value }) => value)).toEqual([
-      '',
-      'year',
-      'type',
-      'tags',
-      'property:Reviewed',
-      'property:Status',
-    ]);
+    const candidates = Array.from(grouping.options, ({ value }) => value);
+    expect(candidates).toEqual(
+      expect.arrayContaining([
+        '',
+        'year',
+        'type',
+        'tags',
+        'lastRead',
+        'dateModified',
+        'collections',
+        'property:Reviewed',
+        'property:Status',
+      ]),
+    );
+    expect(candidates).not.toContain('property:Method');
     changeSelection(root, 'Group by', 'year');
     expect(active(host).group).toEqual({ column: 'year', direction: 'asc' });
     expect(rowIds(root)).toEqual([3, 2, 4]);

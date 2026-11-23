@@ -19,17 +19,167 @@ export interface Property {
   readonly optionColors?: Readonly<Partial<Record<string, OptionColorKey>>>;
 }
 
-export const NATIVE_COLUMNS = [
-  'title',
-  'creators',
-  'year',
-  'source',
-  'type',
-  'tags',
-  'pdf',
-  'added',
+export type NativeValueType = 'text' | 'number' | 'date' | 'link' | 'multi' | 'boolean';
+
+export interface NativeColumnDefinition<Key extends string = string> {
+  readonly key: Key;
+  readonly group: 'common' | 'more';
+  readonly valueType: NativeValueType;
+  readonly icon: string;
+  readonly defaultWidth: number;
+  readonly defaultVisible: boolean;
+  readonly labels: readonly [en: string, zh: string];
+  readonly field?: string;
+  readonly baseMapped?: boolean;
+  readonly search?: true;
+  readonly grouping?: 'value' | 'month' | 'member';
+}
+
+type NativeColumnOptions = Pick<
+  NativeColumnDefinition,
+  'field' | 'baseMapped' | 'search' | 'grouping' | 'defaultVisible'
+>;
+
+function nativeColumn<Key extends string>(
+  key: Key,
+  group: NativeColumnDefinition['group'],
+  valueType: NativeValueType,
+  icon: string,
+  defaultWidth: number,
+  labels: NativeColumnDefinition['labels'],
+  options?: Partial<NativeColumnOptions>,
+): NativeColumnDefinition<Key> {
+  return { key, group, valueType, icon, defaultWidth, labels, defaultVisible: false, ...options };
+}
+
+// Column IDs are persisted; keep `added` as the ID for Zotero's dateAdded.
+export const NATIVE_COLUMN_DEFINITIONS = [
+  nativeColumn('title', 'common', 'text', 'title', 360, ['Title', '标题'], {
+    defaultVisible: true,
+    search: true,
+    field: 'title',
+    baseMapped: true,
+  }),
+  nativeColumn('creators', 'common', 'text', 'creators', 180, ['Authors', '作者'], {
+    defaultVisible: true,
+    search: true,
+  }),
+  nativeColumn('year', 'common', 'number', 'calendar', 90, ['Year', '年份'], {
+    defaultVisible: true,
+    search: true,
+    grouping: 'value',
+  }),
+  nativeColumn('source', 'common', 'text', 'book', 168, ['Publication', '期刊／来源'], {
+    defaultVisible: true,
+    search: true,
+  }),
+  nativeColumn('type', 'common', 'text', 'type', 112, ['Item type', '条目类型'], {
+    defaultVisible: true,
+    grouping: 'value',
+  }),
+  nativeColumn('tags', 'common', 'multi', 'tags', 185, ['Tags', '标签'], {
+    defaultVisible: true,
+    search: true,
+    grouping: 'member',
+  }),
+  nativeColumn('pdf', 'common', 'boolean', 'pdf', 56, ['PDF', 'PDF'], { defaultVisible: true }),
+  nativeColumn('added', 'common', 'date', 'calendar', 112, ['Date added', '添加时间'], {
+    defaultVisible: true,
+    grouping: 'month',
+  }),
+  nativeColumn('citationKey', 'common', 'text', 'citation', 178, ['Citation Key', '引用关键词'], {
+    field: 'citationKey',
+    search: true,
+  }),
+  nativeColumn('collections', 'common', 'multi', 'collections', 208, ['Collections', '所属分类'], {
+    search: true,
+    grouping: 'member',
+  }),
+  nativeColumn('date', 'common', 'date', 'calendar', 122, ['Date', '完整日期'], {
+    field: 'date',
+    baseMapped: true,
+    grouping: 'month',
+  }),
+  nativeColumn('dateModified', 'common', 'date', 'calendar', 128, ['Date Modified', '修改日期'], {
+    grouping: 'month',
+  }),
+  nativeColumn('lastRead', 'common', 'date', 'calendar', 118, ['Last Read', '最后阅读时间'], {
+    grouping: 'month',
+  }),
+  nativeColumn('notesCount', 'common', 'number', 'notes', 110, ['Notes', '笔记数'], {
+    grouping: 'value',
+  }),
+  nativeColumn(
+    'attachmentsCount',
+    'common',
+    'number',
+    'attachments',
+    120,
+    ['Attachments', '附件数'],
+    { grouping: 'value' },
+  ),
+  nativeColumn('doi', 'common', 'link', 'link', 220, ['DOI', 'DOI'], {
+    field: 'DOI',
+    search: true,
+  }),
+  nativeColumn('url', 'common', 'link', 'link', 220, ['URL', '网址'], { field: 'url' }),
+  nativeColumn('journalAbbreviation', 'common', 'text', 'book', 150, ['Journal Abbr', '刊名简称'], {
+    field: 'journalAbbreviation',
+    search: true,
+  }),
+  nativeColumn('publisher', 'common', 'text', 'book', 168, ['Publisher', '出版社'], {
+    field: 'publisher',
+    baseMapped: true,
+    search: true,
+  }),
+  nativeColumn('shortTitle', 'common', 'text', 'title', 206, ['Short Title', '短标题'], {
+    field: 'shortTitle',
+  }),
+  nativeColumn('volume', 'more', 'text', 'text', 84, ['Volume', '卷次'], { field: 'volume' }),
+  nativeColumn('issue', 'more', 'text', 'text', 84, ['Issue', '期号'], { field: 'issue' }),
+  nativeColumn('pages', 'more', 'text', 'text', 104, ['Pages', '页码'], { field: 'pages' }),
+  nativeColumn('language', 'more', 'text', 'text', 104, ['Language', '语言'], {
+    field: 'language',
+  }),
+  nativeColumn('series', 'more', 'text', 'book', 148, ['Series', '系列'], { field: 'series' }),
+  nativeColumn('seriesTitle', 'more', 'text', 'book', 160, ['Series Title', '系列标题'], {
+    field: 'seriesTitle',
+  }),
+  nativeColumn('callNumber', 'more', 'text', 'text', 134, ['Call Number', '索书号'], {
+    field: 'callNumber',
+  }),
+  nativeColumn('place', 'more', 'text', 'text', 124, ['Place', '地点'], {
+    field: 'place',
+    baseMapped: true,
+  }),
+  nativeColumn('edition', 'more', 'text', 'text', 96, ['Edition', '版次'], { field: 'edition' }),
+  nativeColumn('accessDate', 'more', 'date', 'calendar', 122, ['Access Date', '访问时间'], {
+    field: 'accessDate',
+    grouping: 'month',
+  }),
+  nativeColumn('archive', 'more', 'text', 'collections', 146, ['Archive', '档案'], {
+    field: 'archive',
+  }),
+  nativeColumn('archiveLocation', 'more', 'text', 'text', 152, ['Archive Location', '档案编号'], {
+    field: 'archiveLocation',
+  }),
+  nativeColumn('rights', 'more', 'text', 'text', 132, ['Rights', '版权'], { field: 'rights' }),
 ] as const;
-export type NativeColumn = (typeof NATIVE_COLUMNS)[number];
+
+export type NativeColumn = (typeof NATIVE_COLUMN_DEFINITIONS)[number]['key'];
+export const NATIVE_COLUMN_BY_KEY = Object.fromEntries(
+  NATIVE_COLUMN_DEFINITIONS.map((definition) => [definition.key, definition]),
+) as Readonly<Record<NativeColumn, NativeColumnDefinition<NativeColumn>>>;
+export const NATIVE_COLUMNS: readonly NativeColumn[] = NATIVE_COLUMN_DEFINITIONS.map(
+  ({ key }) => key,
+);
+export const DEFAULT_COLUMNS: readonly NativeColumn[] = NATIVE_COLUMN_DEFINITIONS.filter(
+  ({ defaultVisible }) => defaultVisible,
+).map(({ key }) => key);
+
+export function isNativeColumn(value: unknown): value is NativeColumn {
+  return typeof value === 'string' && Object.hasOwn(NATIVE_COLUMN_BY_KEY, value);
+}
 export type Column = NativeColumn | `property:${string}`;
 export type Density = 'compact' | 'comfortable' | 'wrap';
 export const MIN_COLUMN_WIDTH = 48;
@@ -39,6 +189,10 @@ export type SortRule = { readonly column: Column; readonly direction: Direction 
 export type Operator =
   | 'contains'
   | 'equals'
+  | 'notEquals'
+  | 'notContains'
+  | 'gt'
+  | 'lt'
   | 'gte'
   | 'lte'
   | 'has'
@@ -53,8 +207,12 @@ export interface Filter {
 }
 
 export type Grouping =
-  | { readonly column: 'year' | 'type' | `property:${string}`; readonly direction: Direction }
-  | { readonly column: 'tags'; readonly tag: string; readonly direction: Direction };
+  | {
+      readonly column: Exclude<NativeColumn, 'tags' | 'collections'> | `property:${string}`;
+      readonly direction: Direction;
+    }
+  | { readonly column: 'tags'; readonly tag: string; readonly direction: Direction }
+  | { readonly column: 'collections'; readonly collection: string; readonly direction: Direction };
 
 export interface View {
   readonly id: string;
@@ -73,7 +231,8 @@ export interface Scope {
   readonly label: string;
 }
 
-export interface Row {
+export interface Row
+  extends Readonly<Partial<Record<Exclude<NativeColumn, 'tags' | 'pdf' | 'collections'>, string>>> {
   readonly id: number;
   readonly writable: boolean;
   readonly title: string;
@@ -84,12 +243,14 @@ export interface Row {
   readonly tags: readonly string[];
   readonly pdf: boolean;
   readonly added: string;
+  readonly collections?: readonly string[];
   readonly extra: string;
 }
 
 export interface Catalog {
   readonly rows: readonly Row[];
   readonly tags: ReadonlySet<string>;
+  readonly collections?: ReadonlySet<string>;
 }
 
 export interface Preferences {
