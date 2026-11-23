@@ -106,7 +106,7 @@ export const NATIVE_COLUMN_DEFINITIONS = [
   nativeColumn('lastRead', 'common', 'date', 'calendar', 118, ['Last Read', '最后阅读时间'], {
     grouping: 'month',
   }),
-  nativeColumn('notesCount', 'common', 'number', 'notes', 94, ['Notes', '笔记数'], {
+  nativeColumn('notesCount', 'common', 'number', 'notes', 110, ['Notes', '笔记数'], {
     grouping: 'value',
   }),
   nativeColumn(

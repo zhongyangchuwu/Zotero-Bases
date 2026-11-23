@@ -17,6 +17,7 @@ export const workspaceCSS = String.raw`
   --zb-muted: var(--zb-native-muted, var(--zb-light-muted));
   --zb-border: var(--zb-native-border, var(--zb-light-border));
   --zb-accent: var(--zb-native-accent, var(--zb-light-accent));
+  --zb-link: light-dark(var(--zb-accent), #9abdff);
   --zb-selected: var(--zb-native-selection, var(--zb-light-selected));
   --zb-warning: var(--zb-light-warning);
   --zb-warning-text: var(--zb-light-warning-text);
@@ -500,14 +501,16 @@ export const workspaceCSS = String.raw`
   padding: 0 2px;
   border-color: transparent;
   background: transparent;
-  color: var(--zb-accent);
+  color: var(--zb-link);
   text-align: start;
-  text-decoration: underline;
-  text-underline-offset: 2px;
   white-space: inherit;
   overflow: hidden;
   overflow-wrap: inherit;
   text-overflow: ellipsis;
+}
+.zb-workspace .zb-link-open:is(:hover, :focus-visible) {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .zb-workspace .zb-link-control:focus-visible { outline-offset: -2px; }
 .zb-workspace .zb-link-copy {

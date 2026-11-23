@@ -39,7 +39,7 @@
 
 ### 自定义 CSS
 
-CSS 只作用于 `.zb-workspace` 和其中的元素，不影响 Zotero 原生界面或 PDF。常用变量：`--zb-bg` 背景、`--zb-surface` 控件表面、`--zb-text` 正文、`--zb-muted` 次要文字、`--zb-border` 边框、`--zb-accent` 强调色、`--zb-selected` 选区、`--zb-danger` 错误、`--zb-row-height` 行高。常用类：`.zb-top`、`.zb-toolbar`、`.zb-table-wrap`、`.zb-cell-pill`、`.zb-editor`、`.zb-table-status`。
+CSS 只作用于 `.zb-workspace` 和其中的元素，不影响 Zotero 原生界面或 PDF。常用变量：`--zb-bg` 背景、`--zb-surface` 控件表面、`--zb-text` 正文、`--zb-muted` 次要文字、`--zb-border` 边框、`--zb-accent` 强调色、`--zb-link` DOI 与网址链接色、`--zb-selected` 选区、`--zb-danger` 错误、`--zb-row-height` 行高。常用类：`.zb-top`、`.zb-toolbar`、`.zb-table-wrap`、`.zb-cell-pill`、`.zb-editor`、`.zb-table-status`。
 
 ```css
 .zb-workspace {
