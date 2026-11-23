@@ -1,4 +1,4 @@
-import type { Property, PropertyValue } from './contracts';
+import { OPTION_COLORS, type OptionColorKey, type Property, type PropertyValue } from './contracts';
 import { BASES_SYNC_KEY } from './sync-marker';
 
 const LINE_BREAK = /\r\n|[\r\n\u0085\u2028\u2029]/;
@@ -6,6 +6,7 @@ const LINE_PARTS = new RegExp(`(${LINE_BREAK.source})`);
 const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 // Disjoint from the old JSON string-array format, without interpreting its contents.
 const LEGACY_OPTIONS = /^\[\s*(?:"(?:[^"\\]|\\.)*"(?:\s*,\s*"(?:[^"\\]|\\.)*")*\s*)?\]$/;
+const optionColorKeys: ReadonlySet<unknown> = new Set(OPTION_COLORS);
 
 // Preserve labels as written by the user, but key matching is case-insensitive.
 function keyIdentity(key: string): string {
@@ -103,12 +104,29 @@ export function validateProperty(
   extraReserved?: ReadonlySet<string>,
 ): Property {
   const key = validatedKey(property.key, extraReserved);
+  const { optionColors } = property;
   if (property.type !== 'single-select' && property.type !== 'multi-select') {
+    if (optionColors !== undefined) throw new Error('Only select options can have colors.');
     return { key, type: property.type };
   }
   const options = (property.options ?? []).map(optionLabel);
-  if (new Set(options).size !== options.length) throw new Error('Option names must be unique.');
-  return { key, type: property.type, options };
+  const labels = new Set(options);
+  if (labels.size !== options.length) throw new Error('Option names must be unique.');
+  if (optionColors === undefined) return { key, type: property.type, options };
+  if (!optionColors || typeof optionColors !== 'object' || Array.isArray(optionColors)) {
+    throw new Error('Invalid option colors.');
+  }
+  const colors: Partial<Record<string, OptionColorKey>> = Object.create(null);
+  let hasColors = false;
+  for (const [raw, color] of Object.entries(optionColors)) {
+    const label = optionLabel(raw);
+    if (!labels.has(label) || !optionColorKeys.has(color) || Object.hasOwn(colors, label)) {
+      throw new Error('Each option color must match a unique option and use the palette.');
+    }
+    colors[label] = color;
+    hasColors = true;
+  }
+  return { key, type: property.type, options, ...(hasColors && { optionColors: colors }) };
 }
 
 export function isDecimal(value: string): boolean {

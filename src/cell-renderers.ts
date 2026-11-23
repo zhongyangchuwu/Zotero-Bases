@@ -14,7 +14,9 @@ export interface CellActions {
     opener: HTMLButtonElement,
   ): void;
   columnName(column: Column): string;
-  text(key: 'yes' | 'no' | 'locate' | 'openPDF' | 'readOnly' | 'edit' | 'untitled'): string;
+  text(
+    key: 'yes' | 'no' | 'locate' | 'open' | 'openPDF' | 'readOnly' | 'edit' | 'untitled',
+  ): string;
 }
 
 interface Cell {
@@ -152,8 +154,8 @@ export function createCellRenderers(document: Document, actions: CellActions) {
 
   function valueText(value: PropertyValue): string {
     if (typeof value === 'boolean') return actions.text(value ? 'yes' : 'no');
-    if (typeof value === 'string') return value || '—';
-    return value?.length ? value.join('; ') : '—';
+    if (typeof value === 'string') return value;
+    return value?.length ? value.join('; ') : '';
   }
 
   function rowName(row: Row): string {
@@ -200,7 +202,7 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       const opener = button(context, () =>
         actions.edit(row, column, property, value, cell, opener),
       );
-      named(opener, `${editLabel(context)}: ${fullText}`);
+      named(opener, fullText ? `${editLabel(context)}: ${fullText}` : editLabel(context));
       cell.append(opener);
       content = opener;
     } else {
@@ -214,7 +216,13 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     if (!row.writable) strip.title = `${fullText} · ${cell.title}`;
     for (const label of pills) {
       const pill = element('span', 'zb-cell-pill', label);
-      if (property) pill.dataset.tone = choiceTone(label);
+      if (property) {
+        const colors = property.optionColors;
+        pill.dataset.tone =
+          (colors && Object.prototype.hasOwnProperty.call(colors, label)
+            ? colors[label]
+            : undefined) ?? choiceTone(label);
+      }
       strip.append(pill);
     }
     const more = element('span', 'zb-cell-pill zb-cell-pill-more');
@@ -233,7 +241,20 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       const title = button(context, () => actions.open(context.row, false), 'zb-item-title');
       title.textContent = rowName(context.row);
       title.title = `${rowName(context.row)} · ${actions.text('locate')}`;
-      context.cell.append(title);
+      const actionsBox = element('span', 'zb-title-actions');
+      const open = element('button', 'zb-title-action', actions.text('open'));
+      open.type = 'button';
+      named(open, `${actions.text('open')} · ${rowName(context.row)}`);
+      open.addEventListener('click', () => actions.open(context.row, false));
+      actionsBox.append(open);
+      if (context.row.pdf) {
+        const pdf = element('button', 'zb-title-action', actions.text('openPDF'));
+        pdf.type = 'button';
+        named(pdf, `${actions.text('openPDF')} · ${rowName(context.row)}`);
+        pdf.addEventListener('click', () => actions.open(context.row, true));
+        actionsBox.append(pdf);
+      }
+      context.cell.append(title, actionsBox);
     },
     creators({ cell, row }) {
       const full = row.creators;

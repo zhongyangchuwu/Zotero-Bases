@@ -1,10 +1,22 @@
 export type PropertyType = 'text' | 'number' | 'checkbox' | 'single-select' | 'multi-select';
 export type PropertyValue = string | boolean | readonly string[] | null;
 
+export const OPTION_COLORS = [
+  'neutral',
+  'green',
+  'amber',
+  'sky',
+  'violet',
+  'teal',
+  'rose',
+] as const;
+export type OptionColorKey = (typeof OPTION_COLORS)[number];
+
 export interface Property {
   readonly key: string;
   readonly type: PropertyType;
   readonly options?: readonly string[];
+  readonly optionColors?: Readonly<Partial<Record<string, OptionColorKey>>>;
 }
 
 export const NATIVE_COLUMNS = [
@@ -23,6 +35,7 @@ export type Density = 'compact' | 'comfortable' | 'wrap';
 export const MIN_COLUMN_WIDTH = 48;
 export const MAX_COLUMN_WIDTH = 1600;
 export type Direction = 'asc' | 'desc';
+export type SortRule = { readonly column: Column; readonly direction: Direction };
 export type Operator =
   | 'contains'
   | 'equals'
@@ -48,7 +61,7 @@ export interface View {
   readonly name: string;
   readonly scope: string;
   readonly columns: readonly Column[];
-  readonly sort: { readonly column: Column; readonly direction: Direction };
+  readonly sorts: readonly SortRule[];
   readonly filters: readonly Filter[];
   readonly group?: Grouping;
   readonly density?: Density;
@@ -99,6 +112,12 @@ export type ConfigChange =
       readonly key: string;
       readonly option: string;
       readonly clean: boolean;
+    }
+  | {
+      readonly kind: 'set-option-color';
+      readonly key: string;
+      readonly option: string;
+      readonly color: OptionColorKey | undefined;
     }
   | { readonly kind: 'delete-property'; readonly key: string; readonly clean: boolean };
 

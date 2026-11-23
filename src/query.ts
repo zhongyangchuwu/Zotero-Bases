@@ -209,6 +209,28 @@ function sortKey(value: PropertyValue, kind: Kind): SortKey {
   return value;
 }
 
+function compareSortKeys(
+  left: SortKey,
+  right: SortKey,
+  direction: number,
+  kind: Kind,
+  compareText: (left: string, right: string) => number,
+): number {
+  // Missing values stay last; two missing values still allow the next rule to break the tie.
+  if (left === null) return right === null ? 0 : 1;
+  if (right === null) return -1;
+  if (typeof left === 'string' && typeof right === 'string') {
+    const order =
+      kind === 'date' ? (left < right ? -1 : left > right ? 1 : 0) : compareText(left, right);
+    return direction * order;
+  }
+  if (typeof left === 'boolean' && typeof right === 'boolean')
+    return direction * (Number(left) - Number(right));
+  if (typeof left === 'object' && typeof right === 'object')
+    return direction * compareDecimal(left, right);
+  return 0;
+}
+
 function compileSearch(
   search: string,
   view: View,
@@ -284,35 +306,32 @@ export function queryCatalog(
           (row) => checks.every((check) => check(row)) && (!matchesSearch || matchesSearch(row)),
         )
       : catalog.rows;
-  const sort = columnInfo(view.sort.column, properties);
-  if (!sort || rows.length < 2) return { rows, invalid };
+  if (rows.length < 2 || !view.sorts.length) return { rows, invalid };
 
-  const collator = new Intl.Collator(locale, { sensitivity: 'base', numeric: true });
-  const direction = view.sort.direction === 'desc' ? -1 : 1;
-  const sorted = rows.map((row) => ({
-    row,
-    key: sortKey(valueIn(row, view.sort.column, sort.property), sort.kind),
-  }));
-  sorted.sort(({ key: left }, { key: right }) => {
-    // Blank values stay last in either direction, and equal keys keep catalog order.
-    if (left === null) return right === null ? 0 : 1;
-    if (right === null) return -1;
-    if (typeof left === 'string' && typeof right === 'string') {
-      const order =
-        sort.kind === 'date'
-          ? left < right
-            ? -1
-            : left > right
-              ? 1
-              : 0
-          : collator.compare(left, right);
-      return direction * order;
+  // Read and normalize each key once per row, outside the comparator.
+  const sorts = view.sorts.flatMap(({ column, direction }) => {
+    const info = columnInfo(column, properties);
+    if (!info) return [];
+    return [
+      {
+        kind: info.kind,
+        direction: direction === 'desc' ? -1 : 1,
+        keys: rows.map((row) => sortKey(valueIn(row, column, info.property), info.kind)),
+      },
+    ];
+  });
+  if (!sorts.length) return { rows, invalid };
+
+  const compareText = new Intl.Collator(locale, { sensitivity: 'base', numeric: true }).compare;
+  const order = rows.map((_, index) => index);
+  order.sort((left, right) => {
+    for (let index = 0; index < sorts.length; index++) {
+      const { keys, direction, kind } = sorts[index]!;
+      const compared = compareSortKeys(keys[left]!, keys[right]!, direction, kind, compareText);
+      if (compared) return compared;
     }
-    if (typeof left === 'boolean' && typeof right === 'boolean')
-      return direction * (Number(left) - Number(right));
-    if (typeof left === 'object' && typeof right === 'object')
-      return direction * compareDecimal(left, right);
+    // Array sort is stable when all keys tie.
     return 0;
   });
-  return { rows: sorted.map(({ row }) => row), invalid };
+  return { rows: order.map((index) => rows[index]!), invalid };
 }
