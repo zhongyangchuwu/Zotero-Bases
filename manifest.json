@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Bases",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Typed properties and saved literature views inside Zotero.",
   "homepage_url": "https://github.com/zhongyangchuwu/Zotero-Bases",
   "applications": {
