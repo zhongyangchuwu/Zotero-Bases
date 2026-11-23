@@ -220,6 +220,25 @@ function changeSelection(root: ParentNode, label: string, value: string): void {
   field.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+// Model the Gecko host boundary: option presses target a XUL menu outside the
+// workspace, and the native selection commits only if its HTML select survives.
+function nativeOption(panel: HTMLElement, label: string, value: string): void {
+  const field = get<HTMLSelectElement>(panel, `select[aria-label="${label}"]`);
+  const option = [...field.options].find((option) => option.value === value);
+  expect(option, `Missing option ${value}`).toBeDefined();
+  field.focus();
+  Object.defineProperty(field, 'openInParentProcess', { value: true, configurable: true });
+  const xul = 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul';
+  const popup = document.createElementNS(xul, 'menupopup');
+  popup.id = 'ContentSelectDropdownPopup';
+  const item = popup.appendChild(document.createElementNS(xul, 'menuitem'));
+  document.body.append(popup);
+  item.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, composed: true }));
+  popup.remove();
+  Reflect.deleteProperty(field, 'openInParentProcess');
+  if (field.isConnected) changeSelection(panel, label, value);
+}
+
 function type(field: HTMLInputElement, value: string): void {
   field.value = value;
   field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -572,6 +591,53 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).sorts).toEqual([]);
     expect(rowIds(root)).toEqual([1, 2, 3]);
     expect(root.querySelector('.zb-sort-indicator')).toBeNull();
+  });
+
+  it('commits native dropdown choices in all workspace popovers without dismissing them', async () => {
+    const rows = [
+      { ...sample, citationKey: 'K', pages: '002', lastRead: '2025-04-02' },
+      { ...sample, id: 2, title: 'Beta', citationKey: 'A', pages: '001' },
+      { ...sample, id: 3, title: 'Gamma', citationKey: 'K', pages: '001' },
+    ];
+    const { host } = fixture(rows, {
+      ...defaultView,
+      columns: ['title', 'citationKey', 'pages'],
+      sorts: [
+        { column: 'title', direction: 'asc' },
+        { column: 'year', direction: 'asc' },
+      ],
+    });
+    const { root } = attach(host);
+    await settle();
+    const choose = (label: string, value: string) =>
+      nativeOption(get(root, '.zb-popover'), label, value);
+
+    openTool(root, 'Sort');
+    choose('Sort field · 1', 'citationKey');
+    expect(rowIds(root)).toEqual([2, 1, 3]);
+    expect(header(root, 'citationKey').textContent).toContain('↑1');
+    choose('Sort field · 2', 'pages');
+    expect(rowIds(root)).toEqual([2, 3, 1]);
+    expect(header(root, 'pages').textContent).toContain('↑2');
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Sort field · 2');
+
+    openTool(root, 'Filters');
+    click(root, 'Add condition');
+    choose('Filter field · 1', 'accessDate');
+    expect(active(host).filters[0]?.column).toBe('accessDate');
+    expect(get(root, '.zb-popover').getAttribute('aria-label')).toBe('Filters');
+    click(root, 'Remove condition · 1');
+
+    openTool(root, 'Grouping');
+    choose('Group by', 'lastRead');
+    expect(groupTitles(root)).toEqual(['2025-04 (1)', 'No value (2)']);
+    expect(get(root, '.zb-popover').getAttribute('aria-label')).toBe('Grouping');
+
+    openTool(root, 'Properties');
+    choose('Property type', 'multi-select');
+    const options = get<HTMLTextAreaElement>(root, 'textarea[aria-label="Options (one per line)"]');
+    expect(options.hidden).toBe(false);
+    expect(get(root, '.zb-popover').contains(options)).toBe(true);
   });
 
   it('returns focus from a popover without clearing search or the selected row', async () => {

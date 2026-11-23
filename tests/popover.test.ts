@@ -137,6 +137,35 @@ describe('workspace popover', () => {
     expect(document.activeElement).toBe(anchor);
   });
 
+  it('still dismisses on an unrelated press while a native select is open', () => {
+    const { anchor, outside, panel, popover } = fixture();
+    const select = panel.appendChild(document.createElement('select'));
+    Object.defineProperty(select, 'openInParentProcess', { value: true });
+    popover.open(anchor, panel, { initialFocus: () => select });
+    pointerdown(outside);
+    expect(panel.isConnected).toBe(false);
+  });
+
+  it('lets Escape reach an open native select before dismissing the panel', () => {
+    const { anchor, panel, popover, view } = fixture();
+    const select = panel.appendChild(document.createElement('select'));
+    let dropdownOpen = true;
+    Object.defineProperty(select, 'openInParentProcess', { get: () => dropdownOpen });
+    select.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') dropdownOpen = false;
+    });
+    view.addEventListener('keydown', popover.consumeEscape, true);
+    cleanups.push(() => view.removeEventListener('keydown', popover.consumeEscape, true));
+    popover.open(anchor, panel, { initialFocus: () => select });
+
+    expect(keyboard(view, select, { key: 'Escape' }).defaultPrevented).toBe(false);
+    expect(dropdownOpen).toBe(false);
+    expect(panel.isConnected).toBe(true);
+    expect(keyboard(view, select, { key: 'Escape' }).defaultPrevented).toBe(true);
+    expect(panel.isConnected).toBe(false);
+    expect(document.activeElement).toBe(anchor);
+  });
+
   it('switches panels and invokers without restoring the previous focus', () => {
     vi.useFakeTimers();
     const { anchor, field, other, panel, popover, surface } = fixture();
