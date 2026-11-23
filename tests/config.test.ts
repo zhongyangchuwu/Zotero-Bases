@@ -26,7 +26,10 @@ const secondView = {
   name: 'Group reading',
   scope: 'group:18/SUBCOLL0',
   columns: ['title', 'property:Removed'],
-  sort: { column: 'added', direction: 'desc' },
+  sorts: [
+    { column: 'added', direction: 'desc' },
+    { column: 'property:Removed', direction: 'asc' },
+  ],
   filters: [
     { column: 'property:Removed', operator: 'equals', value: 'gone' },
     { column: 'tags', operator: 'has', value: 'elsewhere' },
@@ -42,30 +45,63 @@ describe('Zotero Bases configuration', () => {
     expect(first).toMatchObject({
       properties: [],
       active: 'default',
-      views: [{ id: 'default', scope }],
+      views: [{ id: 'default', scope, sorts: [{ column: 'title', direction: 'asc' }] }],
     });
     expect([...raw.keys()]).toEqual([VIEWS_PREF]);
     expect(createConfig(prefs, () => 'user', validateProperty).settings()).toEqual(first);
   });
 
-  it('restores legacy views without adding presentation fields', () => {
+  it('decodes a legacy sort locally and remotely without rewriting the saved view', () => {
     const { prefs, raw } = preferences();
-    raw.set(VIEWS_PREF, JSON.stringify({ views: [secondView], active: secondView.id }));
+    const { sorts, ...fields } = secondView;
+    const legacy = { ...fields, sort: sorts[0] };
+    const saved = JSON.stringify({ views: [legacy], active: legacy.id });
+    raw.set(VIEWS_PREF, saved);
+    const expected = { ...fields, sorts: [sorts[0]] };
     const config = createConfig(prefs, () => 'user', validateProperty);
     expect(config.settings()).toEqual({
       properties: [],
-      views: [secondView],
+      views: [expected],
       active: secondView.id,
     });
+    expect(raw.get(VIEWS_PREF)).toBe(saved);
     config.writeViews({ views: config.settings().views, active: secondView.id });
     expect(JSON.parse(raw.get(VIEWS_PREF)!)).toEqual({
-      views: [secondView],
+      views: [expected],
       active: secondView.id,
     });
-    expect(decodeSyncSnapshot({ schema: [], views: [secondView] }, validateProperty)).toEqual({
+    expect(decodeSyncSnapshot({ schema: [], views: [legacy] }, validateProperty)).toEqual({
       schema: [],
-      views: [secondView],
+      views: [expected],
     });
+  });
+
+  it('falls back only from an absent sort stack, and normalizes malformed stacks to empty', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const { sorts, ...fields } = secondView;
+    const sort = sorts[0]!;
+    const invalidOrEmpty = [
+      {},
+      { sort: { column: 'no-such-column', direction: 'asc' } },
+      { sort: { column: 'title', direction: 'sideways' } },
+      { sort, sorts: null },
+      { sort, sorts: [] },
+      { sort, sorts: [sort, { column: 'title' }] },
+    ];
+    for (const value of invalidOrEmpty) {
+      const view = { ...fields, ...value };
+      const expected = { ...fields, sorts: [] };
+      raw.set(VIEWS_PREF, JSON.stringify({ views: [view], active: view.id }));
+      expect(config.settings().views).toEqual([expected]);
+      expect(decodeSyncSnapshot({ schema: [], views: [view] }, validateProperty)?.views).toEqual([
+        expected,
+      ]);
+    }
+    const both = { ...secondView, sort: { column: 'title', direction: 'asc' } };
+    expect(decodeSyncSnapshot({ schema: [], views: [both] }, validateProperty)?.views).toEqual([
+      secondView,
+    ]);
   });
 
   it('persists and syncs presentation settings including widths for removed properties', () => {
@@ -173,7 +209,14 @@ describe('Zotero Bases configuration', () => {
     const initial = config.settings().views[0]!;
     config.writeViews({ views: [initial, secondView], active: initial.id });
     const payload = {
-      schema: [{ key: 'ReviewState', type: 'single-select', options: ['Reading', 'Done'] }],
+      schema: [
+        {
+          key: 'ReviewState',
+          type: 'single-select',
+          options: [' Reading ', 'Done'],
+          optionColors: { 'Reading ': 'amber', Done: 'green' },
+        },
+      ],
       views: [
         { ...secondView, group: { column: 'tags', tag: 'Reading', direction: 'desc' } },
         initial,
@@ -182,7 +225,14 @@ describe('Zotero Bases configuration', () => {
     const remote = decodeSyncSnapshot(payload, validateProperty)!;
     config.applySync(remote);
     expect(config.settings()).toEqual({
-      properties: payload.schema,
+      properties: [
+        {
+          key: 'ReviewState',
+          type: 'single-select',
+          options: ['Reading', 'Done'],
+          optionColors: { Reading: 'amber', Done: 'green' },
+        },
+      ],
       views: payload.views,
       active: initial.id,
     });
@@ -198,15 +248,44 @@ describe('Zotero Bases configuration', () => {
     ).toBeUndefined();
     expect(decode({ schema: [{ ...text, key: 'DOI' }], views: [secondView] })).toBeUndefined();
     expect(decode({ schema: [text], views: [secondView, secondView] })).toBeUndefined();
-    expect(decode({ schema: [text], views: [{ ...secondView, sort: {} }] })).toBeUndefined();
     expect(
       decode({
         schema: [text],
-        views: [{ ...secondView, group: { column: 'tags', direction: 'asc' } }],
+        views: [{ ...secondView, sorts: null, group: { column: 'tags', direction: 'asc' } }],
       }),
     ).toBeUndefined();
     expect(decode({ schema: [text], views: [secondView] })?.views[0]?.group).toEqual(
       secondView.group,
     );
+  });
+
+  it('rejects malformed color definitions without partially decoding a portable snapshot', () => {
+    const valid = { key: 'Reading Stage', type: 'multi-select', options: ['Read', 'Café'] };
+    const badColors = [
+      [],
+      null,
+      'green',
+      { Read: 'orange' },
+      { Read: ['green'] },
+      { Unknown: 'green' },
+      { Café: 'amber', 'Cafe\u0301': 'sky' },
+    ];
+    for (const optionColors of badColors) {
+      expect(
+        decodeSyncSnapshot(
+          {
+            schema: [valid, { ...valid, key: 'Another Stage', optionColors }],
+            views: [secondView],
+          },
+          validateProperty,
+        ),
+      ).toBeUndefined();
+    }
+    expect(
+      decodeSyncSnapshot(
+        { schema: [{ key: 'Notes', type: 'text', optionColors: {} }], views: [secondView] },
+        validateProperty,
+      ),
+    ).toBeUndefined();
   });
 });

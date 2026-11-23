@@ -15,11 +15,17 @@ function snapshot(name: string): SyncSnapshot {
         name,
         scope: 'user',
         columns: ['title', 'property:Reading Stage'],
-        sort: { column: 'title', direction: 'asc' },
+        sorts: [{ column: 'title', direction: 'asc' }],
         filters: [],
       },
     ],
   };
+}
+
+function legacySnapshot(name: string) {
+  const { schema, views } = snapshot(name);
+  const { sorts, ...view } = views[0]!;
+  return { schema, views: [{ ...view, sort: sorts[0] }] };
 }
 
 function revisionID(index: number): string {
@@ -46,7 +52,7 @@ function library() {
     beforeRead: undefined as (() => Promise<void>) | undefined,
     beforeAppend: undefined as (() => Promise<void>) | undefined,
     location: undefined as SyncLocation | undefined,
-    add(value: SyncSnapshot, parents: string[] = []) {
+    add(value: unknown, parents: string[] = []) {
       const id = revisionID(++lastID);
       files.push({ id, text: JSON.stringify({ version: 1, id, parents, snapshot: value }) });
       return id;
@@ -229,7 +235,19 @@ describe('private Bases sync', () => {
     const owner = profile(transport, snapshot('On this device'));
     const sync = owner.start();
     await sync.enable();
-    const cloud = snapshot('On other device');
+    const viewed = snapshot('On other device');
+    const cloud: SyncSnapshot = {
+      schema: [{ ...viewed.schema[0]!, optionColors: { Done: 'green' } }],
+      views: [
+        {
+          ...viewed.views[0]!,
+          sorts: [
+            { column: 'property:Reading Stage', direction: 'desc' },
+            { column: 'title', direction: 'asc' },
+          ],
+        },
+      ],
+    };
     const remote = store.add(cloud, [store.files[0]!.id]);
     store.changed();
     await vi.advanceTimersByTimeAsync(500);
@@ -255,6 +273,68 @@ describe('private Bases sync', () => {
       parents: [remote],
       snapshot: snapshot('On this device'),
     });
+  });
+
+  it('compares legacy heads and baselines without rewriting them, and keeps their IDs as parents', async () => {
+    const { store, transport } = library();
+    const baseline = legacySnapshot('Cloud');
+    const rollback = legacySnapshot('Previous local');
+    const remote = store.add(baseline);
+    const original = store.files[0]!.text;
+    const owner = profile(transport, snapshot('Cloud'));
+    const stateKey = 'extensions.zotero-bases.sync.v1';
+    const legacyState = JSON.stringify({ version: 1, enabled: true, baseline, rollback });
+    owner.prefs.set(stateKey, legacyState);
+
+    const sync = owner.start();
+    await sync.syncNow();
+    expect(sync.status()).toMatchObject({ kind: 'ready', canRestore: true });
+    expect(owner.applied).toEqual([]);
+    expect(store.files).toEqual([{ id: remote, text: original }]);
+    expect(owner.prefs.get(stateKey)).toBe(legacyState);
+
+    await sync.restore();
+    expect(owner.state.value).toEqual(snapshot('Previous local'));
+    expect(sync.status()).toMatchObject({ kind: 'pending', canRestore: false });
+    expect(store.files).toEqual([{ id: remote, text: original }]);
+    await sync.syncNow();
+    expect(store.files).toHaveLength(2);
+    expect(JSON.parse(store.files[1]!.text)).toMatchObject({
+      parents: [remote],
+      snapshot: snapshot('Previous local'),
+    });
+    expect(sync.status().kind).toBe('ready');
+  });
+
+  it('publishes changes to rule priority or colors even when all other settings match', async () => {
+    const { store, transport } = library();
+    const defaultSettings = snapshot('Inbox');
+    const view = defaultSettings.views[0]!;
+    const initial: SyncSnapshot = {
+      schema: defaultSettings.schema,
+      views: [{ ...view, sorts: [...view.sorts, { column: 'year', direction: 'desc' }] }],
+    };
+    const owner = profile(transport, initial);
+    const sync = owner.start();
+    await sync.enable();
+    const reordered: SyncSnapshot = {
+      ...initial,
+      views: [{ ...view, sorts: [...initial.views[0]!.sorts].reverse() }],
+    };
+    owner.state.update(reordered);
+    expect(sync.status().kind).toBe('pending');
+    await sync.syncNow();
+    expect(JSON.parse(store.files[1]!.text).snapshot).toEqual(reordered);
+
+    const colored = {
+      ...reordered,
+      schema: [{ ...initial.schema[0]!, optionColors: { Unread: 'teal' } }],
+    } satisfies SyncSnapshot;
+    owner.state.update(colored);
+    expect(sync.status().kind).toBe('pending');
+    await sync.syncNow();
+    expect(JSON.parse(store.files[2]!.text).snapshot).toEqual(colored);
+    expect(sync.status().kind).toBe('ready');
   });
 
   it('keeps local only on request and parents its new revision to all concurrent carrier roots', async () => {

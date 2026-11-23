@@ -5,9 +5,11 @@ import type {
   Density,
   Filter,
   Grouping,
+  OptionColorKey,
   Preferences,
   Property,
   PropertyType,
+  SortRule,
   View,
 } from './contracts';
 import { readProperty, writeProperty } from './extra';
@@ -91,8 +93,23 @@ function isDirection(value: unknown): value is Grouping['direction'] {
   return value === 'asc' || value === 'desc';
 }
 
-function validSort(value: unknown): value is View['sort'] {
+function validSort(value: unknown): value is SortRule {
   return object(value) && column(value.column) && isDirection(value.direction);
+}
+
+function sortRules(value: Record<string, unknown>): SortRule[] {
+  // Sort migration is permissive even in otherwise strict portable snapshots.
+  if (!Object.hasOwn(value, 'sorts')) {
+    const { sort } = value;
+    return validSort(sort) ? [{ column: sort.column, direction: sort.direction }] : [];
+  }
+  if (!Array.isArray(value.sorts)) return [];
+  const sorts: SortRule[] = [];
+  for (const rule of value.sorts) {
+    if (!validSort(rule)) return [];
+    sorts.push({ column: rule.column, direction: rule.direction });
+  }
+  return sorts;
 }
 
 function validDensity(value: unknown): value is Density {
@@ -124,7 +141,6 @@ function view(value: unknown, strict = false): View | undefined {
   ) {
     return undefined;
   }
-  const { sort } = value;
   const group = grouping(value.group);
   const density = validDensity(value.density) ? value.density : undefined;
   const columnWidths = validColumnWidths(value.columnWidths) ? value.columnWidths : undefined;
@@ -132,7 +148,6 @@ function view(value: unknown, strict = false): View | undefined {
     strict &&
     (!Array.isArray(value.columns) ||
       !value.columns.every(column) ||
-      !validSort(sort) ||
       !Array.isArray(value.filters) ||
       !value.filters.every(filter) ||
       (value.group !== undefined && !group) ||
@@ -145,9 +160,7 @@ function view(value: unknown, strict = false): View | undefined {
     name: value.name,
     scope: value.scope,
     columns: Array.isArray(value.columns) ? value.columns.filter(column) : NATIVE_COLUMNS,
-    sort: validSort(sort)
-      ? { column: sort.column, direction: sort.direction }
-      : { column: 'title', direction: 'asc' },
+    sorts: sortRules(value),
     filters: Array.isArray(value.filters)
       ? value.filters
           .filter(filter)
@@ -169,16 +182,17 @@ function propertyType(value: unknown): value is PropertyType {
 
 function property(raw: unknown, validate: Validate): Property | undefined {
   if (!object(raw)) return undefined;
-  const { key, type, options } = raw;
+  const { key, type, options, optionColors } = raw;
   if (
     typeof key !== 'string' ||
     !propertyType(type) ||
     (options !== undefined &&
-      (!Array.isArray(options) || !options.every((option) => typeof option === 'string')))
+      (!Array.isArray(options) || !options.every((option) => typeof option === 'string'))) ||
+    (optionColors !== undefined && !object(optionColors))
   )
     return undefined;
   try {
-    return validate({ key, type, options });
+    return validate({ key, type, options, optionColors: optionColors as Property['optionColors'] });
   } catch {
     return undefined;
   }
@@ -232,7 +246,7 @@ export function createConfig(
         name: 'Default',
         scope: initialScope(),
         columns: NATIVE_COLUMNS,
-        sort: { column: 'title', direction: 'asc' },
+        sorts: [{ column: 'title', direction: 'asc' }],
         filters: [],
       });
     }
@@ -303,10 +317,25 @@ export function changeSchema(
     const property = validate(change.property);
     if (!previous) return { properties: [...properties, property] };
     if (property.type !== previous.type) throw new Error('Property type cannot change');
+    // Extending a definition must not replace separately edited colors from a stale view.
+    const { options, type } = property;
+    const optionColors: Partial<Record<string, OptionColorKey>> = Object.create(null);
+    let hasColors = false;
+    if (options && previous.optionColors) {
+      for (const option of options) {
+        if (!Object.hasOwn(previous.optionColors, option)) continue;
+        optionColors[option] = previous.optionColors[option];
+        hasColors = true;
+      }
+    }
+    const updated: Property = {
+      key: previous.key,
+      type,
+      ...(options && { options }),
+      ...(hasColors && { optionColors }),
+    };
     return {
-      properties: properties.map((current, i) =>
-        i === index ? { ...property, key: previous.key } : current,
-      ),
+      properties: properties.map((current, i) => (i === index ? updated : current)),
     };
   }
   if (!previous) throw new Error('Property no longer exists');
@@ -322,11 +351,24 @@ export function changeSchema(
     .normalize('NFC');
   const optionIndex = previous.options?.indexOf(option) ?? -1;
   if (optionIndex < 0 || !previous.options) throw new Error('Option no longer exists');
+  const optionColors: Partial<Record<string, OptionColorKey>> = Object.assign(
+    Object.create(null),
+    previous.optionColors,
+  );
+  const color = optionColors[option];
+  delete optionColors[option];
+  if (change.kind === 'set-option-color') {
+    if (change.color !== undefined) optionColors[option] = change.color;
+    const updated = validate({ ...previous, optionColors });
+    return { properties: properties.map((current, i) => (i === index ? updated : current)) };
+  }
+
   const options = [...previous.options];
+  const next = change.kind === 'rename-option' ? change.next.trim().normalize('NFC') : null;
   if (change.kind === 'rename-option') options[optionIndex] = change.next;
   else options.splice(optionIndex, 1);
-  const updated = validate({ ...previous, options });
-  const next = change.kind === 'rename-option' ? updated.options![optionIndex]! : null;
+  if (next !== null && color !== undefined) optionColors[next] = color;
+  const updated = validate({ ...previous, options, optionColors });
   const edit: ExtraEdit = (extra) => {
     const value = readProperty(extra, previous);
     if (Array.isArray(value) && value.includes(option)) {

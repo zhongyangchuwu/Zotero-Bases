@@ -53,6 +53,31 @@ describe('property definitions', () => {
     );
   });
 
+  it('normalizes option color labels, including names inherited by ordinary objects', () => {
+    const colored = validateProperty({
+      ...stage,
+      options: [' Cafe\u0301 ', 'café', '__proto__', 'constructor'],
+      optionColors: { ' Cafe\u0301 ': 'amber', café: 'sky', ['__proto__']: 'rose' },
+    });
+    expect(colored.options).toEqual(['Café', 'café', '__proto__', 'constructor']);
+    expect(colored.optionColors?.['Café']).toBe('amber');
+    expect(colored.optionColors?.['café']).toBe('sky');
+    expect(colored.optionColors?.['__proto__']).toBe('rose');
+    expect(colored.optionColors?.['constructor']).toBeUndefined();
+    expect(writeProperty('', colored, 'Café')).toBe('Status: Café');
+    expect(readProperty('Status: Café', colored)).toBe('Café');
+  });
+
+  it('omits empty color maps and rejects colors outside defined labels or on non-select fields', () => {
+    expect(validateProperty({ ...stage, optionColors: {} })).toEqual(stage);
+    expect(() => validateProperty({ ...stage, optionColors: { draft: 'green' } })).toThrow(
+      /option color/,
+    );
+    expect(() => validateProperty({ ...note, optionColors: { Draft: 'green' } })).toThrow(
+      /select options/,
+    );
+  });
+
   it.each(['', ' ', 'X:Y', 'X\n', 'X\rY', 'X\u2028Y'])('rejects non-line-key name %j', (key) => {
     expect(() => validateProperty({ key, type: 'text' })).toThrow();
   });

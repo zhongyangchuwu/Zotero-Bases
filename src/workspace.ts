@@ -2,25 +2,30 @@ import {
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTH,
   NATIVE_COLUMNS,
+  OPTION_COLORS,
   type BulkChange,
   type Catalog,
   type Column,
   type ConfigChange,
+  type Direction,
   type Filter,
   type Density,
   type Grouping,
   type MutationResult,
   type Operator,
+  type OptionColorKey,
   type Preferences,
   type Property,
   type PropertyType,
   type PropertyValue,
   type Row,
+  type SortRule,
   type View,
   type WorkspaceHost,
 } from './contracts';
 import { createCellRenderers } from './cell-renderers';
 import { scopeCustomCSS } from './custom-css';
+import { createFieldIcon } from './field-icons';
 import {
   DEFAULT_GLOBAL_PREFERENCES,
   resolveLanguage,
@@ -29,6 +34,8 @@ import {
 } from './global-preferences';
 import { groupRows, isGroupProperty, type RowGroup } from './grouping';
 import { messages, type Language } from './i18n';
+import { createPopover } from './popover';
+import { popoverCSS } from './popover.css';
 import { cellValue, filterOperators, queryCatalog, type QueryResult } from './query';
 import type { SyncPort } from './sync';
 import { mountSyncBadge } from './sync-controls';
@@ -85,7 +92,24 @@ const words = {
   allLibraries: ['All libraries', '全部文库'],
   columns: ['Columns', '列'],
   showColumns: ['Show columns', '显示列'],
-  sort: ['Sort by', '排序列'],
+  sort: ['Sort', '排序'],
+  sortField: ['Sort field', '排序字段'],
+  addSort: ['Add sort', '添加排序'],
+  clearSort: ['Clear sorting', '清空排序'],
+  removeSort: ['Remove sort', '移除排序'],
+  moveUp: ['Move up', '上移'],
+  moveDown: ['Move down', '下移'],
+  moveLeft: ['Move left', '向左移动'],
+  moveRight: ['Move right', '向右移动'],
+  resetOrder: ['Restore default column order', '恢复默认列序'],
+  resetWidth: ['Restore default width', '恢复默认列宽'],
+  hideColumn: ['Hide this column', '隐藏此列'],
+  columnMenu: ['Column actions', '列操作'],
+  sortAsc: ['Sort ascending', '升序排列'],
+  sortDesc: ['Sort descending', '降序排列'],
+  secondarySort: ['Add as secondary sort', '添加为次级排序'],
+  toggleSort: ['Reverse sort direction', '切换排序方向'],
+  editProperty: ['Edit property', '编辑属性'],
   direction: ['Sort direction', '排序方向'],
   resizeColumn: ['Resize column', '调整列宽'],
   density: ['Row density', '行密度'],
@@ -146,6 +170,15 @@ const words = {
   newOption: ['New option', '新选项'],
   optionName: ['Option name', '选项名称'],
   renameOption: ['Rename option', '重命名选项'],
+  optionColor: ['Option color', '选项配色'],
+  automaticColor: ['Automatic color', '自动配色'],
+  neutral: ['Gray', '灰色'],
+  green: ['Green', '绿色'],
+  amber: ['Amber', '琥珀色'],
+  sky: ['Blue', '蓝色'],
+  violet: ['Violet', '紫色'],
+  teal: ['Teal', '青色'],
+  rose: ['Rose', '玫红色'],
   deleteProperty: ['Delete property', '删除属性'],
   deleteOption: ['Delete option', '删除选项'],
   definitionOnly: ['Remove definition only', '仅移除定义'],
@@ -162,6 +195,7 @@ const words = {
   done: ['Done', '完成'],
   edit: ['Edit', '编辑'],
   readOnly: ['Read-only', '只读'],
+  open: ['Open', '打开'],
   locate: ['Locate in Zotero', '在 Zotero 中定位'],
   openRow: ['Double-click to open PDF or locate in Zotero', '双击打开 PDF 或在 Zotero 中定位'],
   untitled: ['Untitled', '无标题'],
@@ -394,13 +428,6 @@ function mountWorkspaceSurface(
     return node;
   }
 
-  function details(label: string): [HTMLDetailsElement, HTMLDivElement] {
-    const node = element('details');
-    const pane = element('div', 'zb-pane');
-    node.append(element('summary', '', label), pane);
-    return [node, pane];
-  }
-
   function focusKey(node: HTMLElement, key: string): void {
     node.dataset.focus = key;
   }
@@ -411,11 +438,12 @@ function mountWorkspaceSurface(
     render();
     if (key) {
       for (const node of region.querySelectorAll<HTMLElement>('[data-focus]')) {
-        if (node.dataset.focus === key) {
+        if (node.dataset.focus === key && !node.matches(':disabled')) {
           node.focus({ preventScroll: true });
-          break;
+          return;
         }
       }
+      if (popovers.isOpen(region)) firstControl(region)?.focus({ preventScroll: true });
     }
   }
 
@@ -446,20 +474,41 @@ function mountWorkspaceSurface(
   }
 
   const style = element('style');
-  style.textContent = workspaceCSS;
+  style.textContent = workspaceCSS + popoverCSS;
   const customStyle = element('style');
   const surface = element('section', 'zb-workspace');
   surface.lang = options.language;
+  const popovers = createPopover(surface);
+  const headerMenu = createPane(t('columnMenu'), 'zb-view-action-list');
+  let columnsFromTail = false;
+
+  function createPane(label: string, className = ''): HTMLDivElement {
+    const pane = element('div', `zb-pane ${className}`.trim());
+    pane.setAttribute('aria-label', label);
+    return pane;
+  }
+
+  function firstControl(pane: HTMLElement): HTMLElement | null {
+    return pane.querySelector('button:not(:disabled), select:not(:disabled), input:not(:disabled)');
+  }
+
+  function openPane(anchor: HTMLElement, pane: HTMLElement): void {
+    popovers.open(anchor, pane, { initialFocus: () => firstControl(pane) });
+  }
+
+  function tool(label: string, pane: HTMLElement, caption = label, className = 'zb-tool') {
+    const trigger = button(caption, () => openPane(trigger, pane), className, label);
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.setAttribute('aria-haspopup', 'dialog');
+    return trigger;
+  }
   const top = element('div', 'zb-bar zb-top');
   const viewControls = element('div', 'zb-tabs');
   const tabs = element('div', 'zb-tablist');
   tabs.setAttribute('role', 'tablist');
   named(tabs, t('views'));
-  const viewActions = element('details', 'zb-view-actions');
-  const viewActionsTrigger = element('summary', '', '⋯');
-  named(viewActionsTrigger, t('viewActions'));
-  const actions = element('div', 'zb-pane zb-view-action-list');
-  viewActions.append(viewActionsTrigger, actions);
+  const actions = createPane(t('viewActions'), 'zb-view-action-list');
+  const viewActionsTrigger = tool(t('viewActions'), actions, '⋯', 'zb-tool-icon');
   const renameSlot = element('div');
   renameSlot.hidden = true;
   const addViewButton = button('+', () => createView(false), 'zb-tool-icon', t('newView'));
@@ -467,8 +516,7 @@ function mountWorkspaceSurface(
     button(
       label,
       () => {
-        viewActions.open = false;
-        viewActionsTrigger.focus();
+        popovers.close(true);
         run();
       },
       className,
@@ -482,7 +530,7 @@ function mountWorkspaceSurface(
     renameViewButton,
     deleteViewButton,
   );
-  viewControls.append(tabs, addViewButton, viewActions, renameSlot);
+  viewControls.append(tabs, addViewButton, viewActionsTrigger, renameSlot);
   top.append(viewControls);
   const disposeSync =
     options.sync && options.openPreferences
@@ -497,10 +545,19 @@ function mountWorkspaceSurface(
   panel.setAttribute('role', 'tabpanel');
   const toolbar = element('div', 'zb-bar zb-toolbar');
   const scopeSlot = element('label', 'zb-line');
-  const [columnDetails, columnPane] = details(t('columns'));
-  const [filterDetails, filterPane] = details(t('filters'));
-  const [groupDetails, groupPane] = details(t('grouping'));
-  const [propertyDetails, propertyPane] = details(t('properties'));
+  const sortPane = createPane(t('sort'));
+  const filterPane = createPane(t('filters'));
+  const groupPane = createPane(t('grouping'));
+  const columnPane = createPane(t('columns'), 'zb-column-pane');
+  const propertyPane = createPane(t('properties'));
+  const sortTool = tool(t('sort'), sortPane);
+  const filterTool = tool(t('filters'), filterPane);
+  const groupTool = tool(t('grouping'), groupPane);
+  const columnTool = tool(t('columns'), columnPane);
+  columnTool.addEventListener('click', () => {
+    columnsFromTail = false;
+  });
+  const propertyTool = tool(t('properties'), propertyPane);
   const density = select(
     t('density'),
     [
@@ -565,10 +622,11 @@ function mountWorkspaceSurface(
   retry.hidden = true;
   toolbar.append(
     scopeSlot,
-    columnDetails,
-    filterDetails,
-    groupDetails,
-    propertyDetails,
+    sortTool,
+    filterTool,
+    groupTool,
+    columnTool,
+    propertyTool,
     withChevron(density),
     retry,
     searchField,
@@ -621,10 +679,7 @@ function mountWorkspaceSurface(
   tableWrap.addEventListener('click', gridClick, true);
   const resizeObserver = window?.ResizeObserver && new window.ResizeObserver(scheduleWindow);
   resizeObserver?.observe(tableWrap);
-  surface.addEventListener('pointerdown', (event) => {
-    if (viewActions.open && !viewActions.contains(event.target as Node)) viewActions.open = false;
-    dismissSearchOutside(event);
-  });
+  surface.addEventListener('pointerdown', dismissSearchOutside);
   if (narrowWindow) surface.addEventListener('focusin', dismissSearchOutside);
 
   function ownsSearch(target: Node | null): boolean {
@@ -722,8 +777,9 @@ function mountWorkspaceSurface(
       (!surface.contains(target) && target !== root)
     )
       return;
+    if (!composingSearch && popovers.consumeEscape(event)) return;
     if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      if (event.key === ' ' && target.closest('button, input, select, textarea, summary')) {
+      if (event.key === ' ' && target.closest('button, input, select, textarea')) {
         event.stopPropagation();
         return;
       }
@@ -762,12 +818,6 @@ function mountWorkspaceSurface(
     )
       return;
     const target = event.target as Element | null;
-    if (event.key === 'Escape' && viewActions.open && viewActions.contains(target)) {
-      event.preventDefault();
-      viewActions.open = false;
-      viewActionsTrigger.focus();
-      return;
-    }
     if (event.key === 'Escape' && ownsSearch(target)) {
       if (search.value) clearSearch();
       else if (!searchToggle.hidden && !searchField.hidden) closeSearch();
@@ -862,7 +912,7 @@ function mountWorkspaceSurface(
     const changedActive = previousView.id !== view.id;
     const changedScope = previousView.scope !== view.scope;
     const changedColumns = !same(previousView.columns, view.columns);
-    const changedSort = !same(previousView.sort, view.sort);
+    const changedSort = !same(previousView.sorts, view.sorts);
     const changedFilters = !same(previousView.filters, view.filters);
     const changedGrouping = !same(previousView.group, view.group);
     const changedDensity = previousView.density !== view.density;
@@ -881,7 +931,7 @@ function mountWorkspaceSurface(
     if (changedActive || changedScope || changedFilters) clearSelection();
     if (changedActive) {
       stopViewRename();
-      viewActions.open = false;
+      popovers.close(false);
     }
     if (changedActive || changedDensity) syncDensity();
     if (changedActive || changedWidths) updateTableWidths();
@@ -892,7 +942,8 @@ function mountWorkspaceSurface(
       renderBulkProperty();
       updatePropertyHint();
     }
-    if (changedColumns || changedSort || changedProperties || changedActive) renderColumns();
+    if (changedColumns || changedProperties || changedActive) renderColumns();
+    if (changedSort || changedProperties || changedActive) renderSort();
     if (changedColumns || changedProperties) resetMeasurements = true;
     if (changedProperties || changedActive || (changedFilters && !keepFilterInput)) renderFilters();
     if (changedProperties || changedActive || changedScope || changedGrouping) renderGrouping();
@@ -977,7 +1028,7 @@ function mountWorkspaceSurface(
           id,
           scope: host.initialScope(),
           columns: NATIVE_COLUMNS,
-          sort: { column: 'title', direction: 'asc' },
+          sorts: [{ column: 'title', direction: 'asc' }],
           filters: [],
           density: globals.defaultDensity,
         };
@@ -1057,8 +1108,7 @@ function mountWorkspaceSurface(
   }
 
   function showColumns(): void {
-    columnDetails.open = true;
-    columnDetails.querySelector('summary')?.focus();
+    columnTool.click();
   }
 
   function renderScope(): void {
@@ -1085,57 +1135,287 @@ function mountWorkspaceSurface(
     });
   }
 
+  function availableColumn(column: Column): boolean {
+    return !column.startsWith('property:') || !!propertyFor(column);
+  }
+
+  function visibleColumns(): Column[] {
+    return activeView().columns.filter(availableColumn);
+  }
+
+  // Leave unavailable definitions in their existing slots in case they are restored.
+  function reorderColumns(visible: readonly Column[]): void {
+    let index = 0;
+    updateView({
+      columns: activeView().columns.map((column) =>
+        availableColumn(column) ? visible[index++]! : column,
+      ),
+    });
+  }
+
+  function moveColumn(column: Column, to: number): void {
+    const columns = visibleColumns();
+    const from = columns.indexOf(column);
+    if (from < 0 || to < 0 || to >= columns.length || to === from) return;
+    columns.splice(from, 1);
+    columns.splice(to, 0, column);
+    reorderColumns(columns);
+  }
+
+  function showColumn(column: Column, show: boolean): void {
+    const columns = activeView().columns;
+    if (columns.includes(column) === show || (!show && visibleColumns().length <= 1)) return;
+    updateView({
+      columns: show ? [...columns, column] : columns.filter((entry) => entry !== column),
+    });
+  }
+
+  function moveButton(
+    label: string,
+    arrow: string,
+    context: string,
+    enabled: boolean,
+    run: () => void,
+  ): HTMLButtonElement {
+    const control = button(arrow, run, 'zb-order-button', scopedName(label, context));
+    control.disabled = !enabled;
+    return control;
+  }
+
   function renderColumns(): void {
     preserveFocus(columnPane, () => {
-      const view = activeView();
-      const fields = element('fieldset', 'zb-options');
-      fields.append(element('legend', '', t('columns')));
-      for (const column of allColumns()) {
+      const visible = visibleColumns();
+      const defaults = allColumns();
+      const ordered = new Set(visible);
+      const list = element('div', 'zb-pane-list');
+      for (const [index, column] of [
+        ...visible,
+        ...defaults.filter((entry) => !ordered.has(entry)),
+      ].entries()) {
+        const row = element('div', 'zb-line zb-column-rule');
         const label = element('label', 'zb-line');
+        const caption = columnName(column);
         const check = element('input');
         check.type = 'checkbox';
-        check.checked = view.columns.includes(column);
+        check.checked = index < visible.length;
+        check.disabled = check.checked && visible.length === 1;
         focusKey(check, column);
-        check.addEventListener('change', () => {
-          const columns = activeView().columns;
-          updateView({
-            columns: check.checked
-              ? [...columns, column]
-              : columns.filter((entry) => entry !== column),
-          });
+        check.addEventListener('change', () => showColumn(column, check.checked));
+        label.append(check, createFieldIcon(doc, column, propertyFor(column)?.type), caption);
+        row.append(label);
+        if (check.checked) {
+          const up = moveButton(t('moveUp'), '↑', caption, index > 0, () =>
+            moveColumn(column, index - 1),
+          );
+          const down = moveButton(t('moveDown'), '↓', caption, index + 1 < visible.length, () =>
+            moveColumn(column, index + 1),
+          );
+          focusKey(up, `up:${column}`);
+          focusKey(down, `down:${column}`);
+          row.append(up, down);
+        }
+        list.append(row);
+      }
+      const defaultOrder = defaults.filter((column) => ordered.has(column));
+      const reset = button(t('resetOrder'), () => reorderColumns(defaultOrder));
+      focusKey(reset, 'reset-order');
+      reset.disabled = same(visible, defaultOrder);
+      columnPane.replaceChildren(list, reset);
+    });
+  }
+
+  function setSort(column: Column, direction: Direction, primary = false): void {
+    const sorts = [...activeView().sorts];
+    const from = sorts.findIndex((rule) => rule.column === column);
+    const rule = { column, direction };
+    if (primary) {
+      if (from >= 0) sorts.splice(from, 1);
+      sorts.unshift(rule);
+    } else if (from >= 0) {
+      sorts[from] = rule;
+    } else {
+      sorts.push(rule);
+    }
+    updateView({ sorts });
+  }
+
+  function removeSort(column: Column): void {
+    updateView({ sorts: activeView().sorts.filter((rule) => rule.column !== column) });
+  }
+
+  function renderSort(): void {
+    preserveFocus(sortPane, () => {
+      const sorts = activeView().sorts;
+      const taken = new Set(sorts.map(({ column }) => column));
+      const fields = columnItems();
+      const free = fields.find(([column]) => !taken.has(column));
+      const list = element('div', 'zb-pane-list');
+      for (const [index, rule] of sorts.entries()) {
+        const row = element('div', 'zb-line zb-sort-rule');
+        const context = String(index + 1);
+        const caption = columnName(rule.column);
+        const items = fields.filter(([column]) => column === rule.column || !taken.has(column));
+        if (!availableColumn(rule.column))
+          items.push([rule.column, `${caption} (${t('unavailable')})`]);
+        const field = select(scopedName(t('sortField'), context), items, rule.column);
+        focusKey(field, `field:${index}`);
+        field.addEventListener('change', () => {
+          const next = [...sorts];
+          next[index] = { ...rule, column: field.value as Column };
+          updateView({ sorts: next });
         });
-        label.append(check, columnName(column));
-        fields.append(label);
+        const direction = select(
+          scopedName(t('direction'), context),
+          [
+            ['asc', t('asc')],
+            ['desc', t('desc')],
+          ],
+          rule.direction,
+        );
+        focusKey(direction, `direction:${rule.column}`);
+        direction.addEventListener('change', () =>
+          setSort(rule.column, direction.value as Direction),
+        );
+        const move = (step: number): void => {
+          const next = [...sorts];
+          [next[index], next[index + step]] = [next[index + step]!, rule];
+          updateView({ sorts: next });
+        };
+        const up = moveButton(t('moveUp'), '↑', caption, index > 0, () => move(-1));
+        const down = moveButton(t('moveDown'), '↓', caption, index + 1 < sorts.length, () =>
+          move(1),
+        );
+        const remove = button(
+          '×',
+          () => removeSort(rule.column),
+          'zb-order-button',
+          scopedName(t('removeSort'), caption),
+        );
+        focusKey(up, `up:${rule.column}`);
+        focusKey(down, `down:${rule.column}`);
+        focusKey(remove, `remove:${rule.column}`);
+        row.append(
+          element('span', 'zb-sort-priority', context),
+          field,
+          direction,
+          up,
+          down,
+          remove,
+        );
+        list.append(row);
       }
-      const order = element('div', 'zb-line');
-      const sortItems = columnItems();
-      if (!sortItems.some(([column]) => column === view.sort.column)) {
-        sortItems.push([view.sort.column, `${columnName(view.sort.column)} (${t('unavailable')})`]);
-      }
-      const sort = select(t('sort'), sortItems, view.sort.column);
-      focusKey(sort, 'sort');
-      sort.addEventListener('change', () =>
-        updateView({ sort: { ...activeView().sort, column: sort.value as Column } }),
+      const add = button(t('addSort'), () => {
+        if (free) setSort(free[0], 'asc');
+      });
+      add.disabled = !free;
+      focusKey(add, 'add-sort');
+      const clear = button(t('clearSort'), () => updateView({ sorts: [] }));
+      clear.disabled = !sorts.length;
+      focusKey(clear, 'clear-sort');
+      const controls = element('div', 'zb-line');
+      controls.append(add, clear);
+      sortPane.replaceChildren(list, controls);
+    });
+  }
+
+  function updateBadge(trigger: HTMLButtonElement, label: string, count: number): void {
+    const previous = trigger.lastElementChild;
+    if (count) {
+      const badge = previous ?? element('span', 'zb-tool-badge');
+      badge.textContent = String(count);
+      badge.setAttribute('aria-hidden', 'true');
+      if (!previous) trigger.append(badge);
+    } else {
+      previous?.remove();
+    }
+    trigger.setAttribute('aria-label', count ? `${label} ${count}` : label);
+  }
+
+  function openColumnMenu(trigger: HTMLButtonElement, column: Column): void {
+    if (trigger.getAttribute('aria-expanded') === 'true') {
+      popovers.close(true);
+      return;
+    }
+    const view = activeView();
+    const caption = columnName(column);
+    headerMenu.setAttribute('aria-label', scopedName(t('columnMenu'), caption));
+    const action = (label: string, run: () => void, enabled = true) => {
+      const control = button(label, () => {
+        popovers.close(true);
+        run();
+      });
+      control.disabled = !enabled;
+      return control;
+    };
+    const rule = view.sorts.find((entry) => entry.column === column);
+    const sorting = [
+      action(t('sortAsc'), () => setSort(column, 'asc', true)),
+      action(t('sortDesc'), () => setSort(column, 'desc', true)),
+    ];
+    if (rule) {
+      sorting.push(
+        action(t('toggleSort'), () => setSort(column, rule.direction === 'asc' ? 'desc' : 'asc')),
+        action(t('removeSort'), () => removeSort(column)),
       );
-      const direction = select(
-        t('direction'),
-        [
-          ['asc', t('asc')],
-          ['desc', t('desc')],
-        ],
-        view.sort.direction,
+    } else {
+      sorting.push(
+        action(
+          t('secondarySort'),
+          () => setSort(column, 'asc'),
+          view.sorts.some((entry) => availableColumn(entry.column)),
+        ),
       );
-      focusKey(direction, 'direction');
-      direction.addEventListener('change', () =>
-        updateView({
-          sort: { ...activeView().sort, direction: direction.value === 'desc' ? 'desc' : 'asc' },
+    }
+    const visible = visibleColumns();
+    const index = visible.indexOf(column);
+    const rtl = window?.getComputedStyle(trigger).direction === 'rtl';
+    const left = index + (rtl ? 1 : -1);
+    const right = index + (rtl ? -1 : 1);
+    const neighbor = (step: number) => step >= 0 && step < visible.length;
+    const columns = [
+      action(t('moveLeft'), () => moveColumn(column, left), neighbor(left)),
+      action(t('moveRight'), () => moveColumn(column, right), neighbor(right)),
+      action(
+        t('resetWidth'),
+        () => setColumnWidth(column, defaultColumnWidth(column)),
+        view.columnWidths?.[column] !== undefined,
+      ),
+      action(
+        t('hideColumn'),
+        () => {
+          showColumn(column, false);
+          const next = visible[index + 1] ?? visible[index - 1]!;
+          (headerTrigger(next) ?? columnTool).focus({ preventScroll: true });
+        },
+        visible.length > 1,
+      ),
+    ];
+    const property = propertyFor(column);
+    if (property) {
+      columns.push(
+        button(t('editProperty'), () => {
+          const field = Array.from(
+            propertyList.querySelectorAll<HTMLElement>('[data-property]'),
+          ).find((block) => block.dataset.property === property.key);
+          popovers.open(propertyTool, propertyPane, {
+            initialFocus: () =>
+              field?.querySelector<HTMLElement>('button[aria-pressed="true"]') ??
+              field?.querySelector<HTMLElement>('[data-property-heading]') ??
+              firstControl(propertyPane),
+            returnFocus: () => headerTrigger(column) ?? propertyTool,
+          });
+          field?.scrollIntoView?.({ block: 'nearest' });
         }),
       );
-      const byLabel = element('label', 'zb-line');
-      byLabel.append(t('sort'), sort);
-      order.append(byLabel, direction);
-      columnPane.replaceChildren(fields, order);
-    });
+    }
+    headerMenu.replaceChildren(...sorting, element('hr'), ...columns);
+    openPane(trigger, headerMenu);
+  }
+
+  function headerTrigger(column: Column): HTMLButtonElement | undefined {
+    return Array.from(tableWrap.querySelectorAll<HTMLButtonElement>('[data-header-column]')).find(
+      (trigger) => trigger.dataset.headerColumn === column,
+    );
   }
 
   function setGrouping(group: Grouping | undefined): void {
@@ -1539,6 +1819,7 @@ function mountWorkspaceSurface(
       for (const property of preferences.properties) {
         const { key, type } = property;
         const block = element('div', 'zb-property');
+        block.dataset.property = key;
         const heading = element('div', 'zb-line');
         const remove = button(
           t('deleteProperty'),
@@ -1547,13 +1828,16 @@ function mountWorkspaceSurface(
           scopedName(t('deleteProperty'), key),
         );
         focusKey(remove, JSON.stringify(['property', key]));
-        heading.append(element('strong', '', key), element('span', '', t(type)), remove);
+        const title = element('strong', '', key);
+        title.dataset.propertyHeading = '';
+        title.tabIndex = -1;
+        heading.append(title, element('span', '', t(type)), remove);
         block.append(heading);
         if (deleteChoice?.key === key && deleteChoice.option === undefined)
           block.append(deleteActions(key));
         if (isSelectProperty(type)) {
           for (const label of property.options ?? [])
-            block.append(renderPropertyOption(key, label));
+            block.append(renderPropertyOption(property, label));
           block.append(buildOptionForm(property));
         }
         properties.append(block);
@@ -1562,8 +1846,9 @@ function mountWorkspaceSurface(
     });
   }
 
-  function renderPropertyOption(key: string, label: string): HTMLElement {
-    const line = element('div', 'zb-line');
+  function renderPropertyOption(property: Property, label: string): HTMLElement {
+    const { key } = property;
+    const line = element('div', 'zb-line zb-property-option');
     const context = `${key}: ${label}`;
     const rename = button(
       label,
@@ -1594,6 +1879,29 @@ function mountWorkspaceSurface(
     );
     focusKey(remove, JSON.stringify(['option', key, label]));
     line.append(rename, remove);
+    const palette = element('div', 'zb-option-palette');
+    palette.setAttribute('role', 'group');
+    palette.setAttribute('aria-label', scopedName(t('optionColor'), context));
+    const current =
+      property.optionColors && Object.hasOwn(property.optionColors, label)
+        ? property.optionColors[label]
+        : undefined;
+    const colors: readonly (OptionColorKey | undefined)[] = [undefined, ...OPTION_COLORS];
+    for (const color of colors) {
+      const swatch = button(
+        color ? '' : '↺',
+        () => {
+          void changeProperty({ kind: 'set-option-color', key, option: label, color });
+        },
+        'zb-option-swatch',
+        scopedName(t(color ?? 'automaticColor'), context),
+      );
+      if (color) swatch.dataset.tone = color;
+      swatch.setAttribute('aria-pressed', String(color === current));
+      focusKey(swatch, JSON.stringify(['color', key, label, color]));
+      palette.append(swatch);
+    }
+    line.append(palette);
     if (deleteChoice?.key === key && deleteChoice.option === label)
       line.append(deleteActions(key, label));
     return line;
@@ -1868,6 +2176,13 @@ function mountWorkspaceSurface(
         : undefined;
     const invalid = result?.invalid.length ?? 0;
     const invalidGroup = Boolean(result && view.group && !groups);
+    updateBadge(
+      sortTool,
+      t('sort'),
+      view.sorts.filter(({ column }) => availableColumn(column)).length,
+    );
+    updateBadge(filterTool, t('filters'), result ? view.filters.length - invalid : 0);
+    updateBadge(groupTool, t('grouping'), groups ? 1 : 0);
     warning.hidden = !invalid && !invalidGroup;
     filterWarning.hidden = !invalid;
     filterWarningText.textContent = invalid ? `${t('invalidFilters')} (${invalid}).` : '';
@@ -1889,9 +2204,9 @@ function mountWorkspaceSurface(
     entries = flattenRows(items ?? [], groups, foldedGroups);
     layout.replace(entries);
     const top = oldKey ? layout.indexOf(oldKey) : -1;
-    const columns = view.columns.filter(
-      (column) => !column.startsWith('property:') || propertyFor(column),
-    );
+    const columns = visibleColumns();
+    const sorts = view.sorts.filter(({ column }) => availableColumn(column));
+    if (popovers.isOpen(headerMenu)) popovers.close(true);
     const currentColumn =
       activeCell && columns.includes(activeCell.column) ? activeCell.column : columns[0];
     const currentEntry =
@@ -1906,6 +2221,7 @@ function mountWorkspaceSurface(
     mounted.clear();
     tableBody = undefined;
     paintedCell = undefined;
+    let tail: HTMLButtonElement | undefined;
 
     preserveFocus(tableWrap, () => {
       if (!items || !columns.length) {
@@ -1943,42 +2259,66 @@ function mountWorkspaceSurface(
       });
       selectCell.append(all);
       titles.append(selectCell);
+      const headings: HTMLTableCellElement[] = [];
       for (const column of columns) {
         const col = element('col');
         col.dataset.column = column;
         colgroup.append(col);
         const heading = element('th');
         heading.scope = 'col';
-        const sorted = column === view.sort.column;
-        const asc = view.sort.direction === 'asc';
-        if (sorted) heading.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+        const index = sorts.findIndex((rule) => rule.column === column);
+        const direction = sorts[index]?.direction;
+        if (index === 0)
+          heading.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
         const caption = columnName(column);
-        const sort = button(
-          `${caption}${sorted ? (asc ? ' ↑' : ' ↓') : ''}`,
-          () => {
-            const { sort } = activeView();
-            updateView({
-              sort: {
-                column,
-                direction: sort.column === column && sort.direction === 'asc' ? 'desc' : 'asc',
-              },
-            });
-          },
-          '',
-          scopedName(t('sort'), caption),
+        const label = direction
+          ? `${caption} · ${t(direction)}${sorts.length > 1 ? ` ${index + 1}` : ''}`
+          : caption;
+        const trigger = element('button', 'zb-header-button');
+        trigger.type = 'button';
+        named(trigger, scopedName(t('columnMenu'), label));
+        trigger.dataset.headerColumn = column;
+        trigger.setAttribute('aria-haspopup', 'dialog');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.append(
+          createFieldIcon(doc, column, propertyFor(column)?.type),
+          element('span', 'zb-header-label', caption),
         );
-        focusKey(sort, `header:${column}`);
-        heading.append(sort);
+        if (direction) {
+          const arrow = direction === 'asc' ? '↑' : '↓';
+          const indicator = element(
+            'span',
+            'zb-sort-indicator',
+            sorts.length > 1 ? `${arrow}${index + 1}` : arrow,
+          );
+          indicator.setAttribute('aria-hidden', 'true');
+          trigger.append(indicator);
+        }
+        focusKey(trigger, `header:${column}`);
+        heading.append(trigger);
+        headings.push(heading);
         heading.append(resizeGrip(table, col, column, caption));
         titles.append(heading);
       }
+      bindHeaderActions(titles, columns, headings);
       // The unsized final column takes only the surplus in the fixed table layout.
       colgroup.append(element('col'));
       const actionCell = element('th', 'zb-table-tail');
-      const addColumn = button('+', showColumns, 'zb-tool-icon', t('showColumns'));
+      const addColumn = button(
+        '+',
+        () => {
+          columnsFromTail = true;
+          openPane(addColumn, columnPane);
+        },
+        'zb-tool-icon',
+        t('showColumns'),
+      );
+      addColumn.setAttribute('aria-haspopup', 'dialog');
+      addColumn.setAttribute('aria-expanded', 'false');
       focusKey(addColumn, 'show-columns');
       actionCell.append(addColumn);
       titles.append(actionCell);
+      tail = addColumn;
       header.append(titles);
       const body = element('tbody');
       const spacer = () => {
@@ -2002,6 +2342,7 @@ function mountWorkspaceSurface(
         tableWrap.append(empty);
       }
     });
+    if (columnsFromTail) popovers.reanchor(tail ?? columnTool, columnPane);
     if (initialScroll && items) {
       const restoredTop = initialScroll.key ? layout.indexOf(initialScroll.key) : -1;
       tableWrap.scrollLeft = initialScroll.left;
@@ -2011,6 +2352,64 @@ function mountWorkspaceSurface(
       renderWindow(resetScroll ? 0 : top < 0 ? tableWrap.scrollTop : layout.offset(top) + distance);
     }
     syncSelection();
+  }
+
+  function bindHeaderActions(
+    titles: HTMLTableRowElement,
+    columns: readonly Column[],
+    headings: readonly HTMLTableCellElement[],
+  ): void {
+    let drag: { id: number; from: number; x: number; slot: number; sign: number } | undefined;
+    let marker: HTMLTableCellElement | undefined;
+    let suppressClick = false;
+    const target = (event: MouseEvent) =>
+      (event.target as Element).closest<HTMLButtonElement>('[data-header-column]');
+    titles.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || drag) return;
+      suppressClick = false;
+      if (columns.length < 2) return;
+      const trigger = target(event);
+      if (!trigger) return;
+      const from = columns.indexOf(trigger.dataset.headerColumn as Column);
+      const sign = window?.getComputedStyle(titles).direction === 'rtl' ? -1 : 1;
+      drag = { id: event.pointerId, from, x: event.clientX, slot: from, sign };
+      trigger.setPointerCapture?.(event.pointerId);
+    });
+    titles.addEventListener('pointermove', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const { from, sign } = drag;
+      if (!suppressClick && Math.abs(event.clientX - drag.x) < 6) return;
+      if (!suppressClick) {
+        suppressClick = true;
+        popovers.close(false);
+      }
+      const x = event.clientX * sign;
+      const index = headings.findIndex((heading) => {
+        const { left, right } = heading.getBoundingClientRect();
+        return x < (left + right) * 0.5 * sign;
+      });
+      const boundary = index < 0 ? headings.length : index;
+      drag.slot = boundary > from ? boundary - 1 : boundary;
+      if (marker) delete marker.dataset.drop;
+      marker = drag.slot === from ? undefined : headings[Math.min(boundary, headings.length - 1)];
+      if (marker) marker.dataset.drop = boundary === headings.length ? 'after' : 'before';
+    });
+    const finish = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const { from, slot } = drag;
+      drag = undefined;
+      if (marker) delete marker.dataset.drop;
+      marker = undefined;
+      if (event.type === 'pointerup' && suppressClick) moveColumn(columns[from]!, slot);
+    };
+    titles.addEventListener('pointerup', finish);
+    titles.addEventListener('pointercancel', finish);
+    titles.addEventListener('lostpointercapture', finish);
+    titles.addEventListener('click', (event) => {
+      const trigger = target(event);
+      if (!trigger || (suppressClick && event.detail > 0)) return;
+      openColumnMenu(trigger, trigger.dataset.headerColumn as Column);
+    });
   }
 
   function viewportHeight(): number {
@@ -2237,7 +2636,7 @@ function mountWorkspaceSurface(
       target.closest('.zb-editor')
     )
       return;
-    if (event.key === 'Enter' && target.matches('input[type=checkbox]')) return;
+    if (event.key === 'Enter' && target.matches('input[type=checkbox], .zb-title-action')) return;
     const command = tableKeys.handle(event);
     if (!command) return;
     if (!runGridCommand(command)) return;
@@ -2355,6 +2754,16 @@ function mountWorkspaceSurface(
     if (table.isConnected) widthGeometryChanged();
   }
 
+  function setColumnWidth(column: Column, width: number): void {
+    const view = activeView();
+    const value = width === defaultColumnWidth(column) ? undefined : width;
+    if (view.columnWidths?.[column] === value) return;
+    const widths = { ...view.columnWidths };
+    if (value === undefined) delete widths[column];
+    else widths[column] = value;
+    updateView({ columnWidths: Object.keys(widths).length ? widths : undefined });
+  }
+
   function resizeGrip(
     table: HTMLTableElement,
     col: HTMLTableColElement,
@@ -2376,12 +2785,7 @@ function mountWorkspaceSurface(
       Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, Math.round(width)));
     const commit = (width: number) => {
       if (!tableWrap.contains(table)) return;
-      const view = activeView();
-      if (width === columnWidth(view, column)) return;
-      const widths = { ...view.columnWidths };
-      if (width === defaultColumnWidth(column)) delete widths[column];
-      else widths[column] = width;
-      updateView({ columnWidths: Object.keys(widths).length ? widths : undefined });
+      setColumnWidth(column, width);
     };
     grip.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || drag) return;
@@ -2800,6 +3204,7 @@ function mountWorkspaceSurface(
   renderTabs();
   renderScope();
   renderColumns();
+  renderSort();
   renderFilters();
   renderGrouping();
   renderProperties();
@@ -2821,6 +3226,7 @@ function mountWorkspaceSurface(
     disposed = true;
     unsubscribe();
     disposeSync?.();
+    popovers.dispose();
     keyTarget.removeEventListener('keydown', captureKeys as EventListener, true);
     narrowWindow?.removeEventListener('change', syncSearchMode);
     window?.clearTimeout(searchTimer);

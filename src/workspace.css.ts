@@ -68,9 +68,9 @@ export const workspaceCSS = String.raw`
   min-height: 1.9rem;
   max-width: 100%;
 }
-.zb-workspace button, .zb-workspace summary, .zb-workspace input[type='checkbox'] { cursor: pointer; }
+.zb-workspace button, .zb-workspace input[type='checkbox'] { cursor: pointer; }
 .zb-workspace :is(button, input, select, textarea):disabled { cursor: default; opacity: 0.6; }
-.zb-workspace :where(button, summary, [role='tab']):hover:not(:disabled) { background: var(--zb-selected); }
+.zb-workspace :where(button, [role='tab']):hover:not(:disabled) { background: var(--zb-selected); }
 .zb-workspace :focus-visible { outline: 2px solid var(--zb-accent); outline-offset: 1px; }
 .zb-workspace .zb-bar, .zb-workspace .zb-line, .zb-workspace .zb-tabs,
 .zb-workspace .zb-options {
@@ -83,8 +83,7 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-tablist { display: flex; gap: 0.25rem; max-width: 100%; overflow-x: auto; padding: 3px; }
 .zb-workspace .zb-tablist button { white-space: nowrap; }
 .zb-workspace :is([aria-selected='true'], [aria-pressed='true']) { color: var(--zb-accent); border-color: var(--zb-accent); background: var(--zb-selected); }
-.zb-workspace .zb-view-actions { position: relative; flex-shrink: 0; }
-.zb-workspace .zb-view-actions > summary, .zb-workspace .zb-tool-icon {
+.zb-workspace .zb-tool-icon {
   display: grid;
   place-items: center;
   width: 1.9rem;
@@ -93,14 +92,18 @@ export const workspaceCSS = String.raw`
   line-height: 1;
   font-size: 1.14em;
 }
-.zb-workspace .zb-view-action-list {
-  position: absolute;
-  inset-block-start: 100%;
-  inset-inline-end: 0;
-  z-index: 4;
-  min-width: max-content;
+.zb-workspace .zb-view-action-list button {
+  text-align: start;
+  background: transparent;
+  border-color: transparent;
 }
-.zb-workspace .zb-view-action-list button { text-align: start; }
+.zb-workspace .zb-view-action-list button:hover:not(:disabled) { background: var(--zb-selected); }
+.zb-workspace .zb-view-action-list hr {
+  border: 0;
+  border-block-start: 1px solid var(--zb-border);
+  width: 100%;
+  margin: 0.05rem 0;
+}
 .zb-workspace .zb-top { position: relative; }
 .zb-workspace .zb-settings { flex: none; }
 .zb-workspace .zb-sync-badge {
@@ -119,7 +122,31 @@ export const workspaceCSS = String.raw`
 .zb-workspace .zb-sync-badge[data-status='attention'] { color: light-dark(#855700, #ffdb80); }
 .zb-workspace .zb-sync-badge[data-status='error'] { color: var(--zb-danger); }
 .zb-workspace .zb-panel { display: flex; flex-direction: column; gap: 0.55rem; flex: 1; min-height: 0; }
-.zb-workspace .zb-toolbar { position: relative; align-items: flex-start; }
+.zb-workspace .zb-toolbar { position: relative; align-items: center; }
+.zb-workspace :is(.zb-top, .zb-toolbar) .zb-tool-icon:not(.zb-search-toggle, .zb-sync-badge),
+.zb-workspace .zb-tool {
+  border-color: color-mix(in srgb, var(--zb-border) 65%, transparent);
+  background: transparent;
+}
+.zb-workspace .zb-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  white-space: nowrap;
+}
+.zb-workspace :is(.zb-top, .zb-toolbar) :is(.zb-tool, .zb-tool-icon):is(
+  :hover:not(:disabled), [aria-expanded='true']
+) { background: var(--zb-selected); }
+.zb-workspace .zb-tool[aria-expanded='true'] { border-color: var(--zb-accent); }
+.zb-workspace .zb-tool-badge {
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  padding-inline: 0.3em;
+  border-radius: 4px;
+  color: var(--zb-accent);
+  background: var(--zb-selected);
+}
 .zb-workspace .zb-select-chevron {
   position: relative;
   display: inline-grid;
@@ -193,20 +220,45 @@ export const workspaceCSS = String.raw`
   transform-origin: left center;
 }
 .zb-workspace .zb-search input { flex: 1; min-width: 0; }
-.zb-workspace details { max-width: 100%; }
-.zb-workspace summary { width: max-content; max-width: 100%; border: 1px solid var(--zb-border); border-radius: 0.3rem; padding: 0.26rem 0.55rem; }
 .zb-workspace .zb-pane {
-  border: 1px solid var(--zb-border);
-  border-radius: 0.3rem;
-  background: var(--zb-surface);
-  padding: 0.5rem;
-  margin-block-start: 0.25rem;
   display: grid;
   gap: 0.45rem;
-  max-height: 36vh;
-  overflow: auto;
+  min-width: 0;
 }
 .zb-workspace .zb-pane-list { display: grid; gap: 0.35rem; }
+.zb-workspace .zb-column-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.3rem;
+}
+.zb-workspace .zb-column-rule label { gap: 0.35rem; overflow-wrap: anywhere; }
+.zb-workspace .zb-column-rule svg { flex: none; color: var(--zb-muted); }
+.zb-workspace .zb-column-pane { min-width: min(15rem, 100%); }
+.zb-workspace .zb-order-button { min-width: 1.7rem; padding-inline: 0.32rem; }
+.zb-workspace .zb-sort-rule { gap: 0.3rem; }
+.zb-workspace .zb-sort-rule select { min-width: 0; }
+.zb-workspace .zb-sort-priority {
+  min-width: 1.1em;
+  text-align: center;
+  color: var(--zb-muted);
+  font-variant-numeric: tabular-nums;
+}
+.zb-workspace .zb-option-palette { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.zb-workspace .zb-option-palette .zb-option-swatch {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  min-height: 1.35rem;
+  padding: 0;
+  border-radius: 4px;
+  line-height: 1;
+}
+.zb-workspace .zb-option-palette .zb-option-swatch[data-tone] {
+  background: var(--zb-choice-tone, var(--zb-pill-bg));
+}
+.zb-workspace .zb-option-palette .zb-option-swatch:is(:hover, [aria-pressed='true']) {
+  border-color: var(--zb-accent);
+}
 .zb-workspace .zb-property { border-block-start: 1px solid var(--zb-border); padding-block: 0.45rem 0; }
 .zb-workspace .zb-property + .zb-property { margin-block-start: 0.45rem; }
 .zb-workspace .zb-property > .zb-line { margin-block: 0.25rem; }
@@ -242,6 +294,7 @@ export const workspaceCSS = String.raw`
   text-align: start;
   padding: 0.2rem 0.55rem;
   border-block-end: 1px solid var(--zb-border);
+  border-inline-end: 1px solid color-mix(in srgb, var(--zb-border) 55%, var(--zb-surface));
   vertical-align: middle;
 }
 .zb-workspace th {
@@ -263,6 +316,27 @@ export const workspaceCSS = String.raw`
   border-color: transparent;
   background: transparent;
 }
+.zb-workspace th .zb-header-button {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  user-select: none;
+  touch-action: pan-y;
+}
+.zb-workspace .zb-field-icon, .zb-workspace .zb-sort-indicator { flex: none; color: var(--zb-muted); }
+.zb-workspace .zb-header-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.zb-workspace th[data-drop='before']::before, .zb-workspace th[data-drop='after']::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  width: 2px;
+  background: var(--zb-accent);
+  z-index: 1;
+  pointer-events: none;
+}
+.zb-workspace th[data-drop='before']::before { inset-inline-start: 0; }
+.zb-workspace th[data-drop='after']::before { inset-inline-end: 0; }
 .zb-workspace th.zb-table-tail { padding-inline: 3px 5px; }
 .zb-workspace .zb-table-tail > button {
   margin-inline-start: auto;
@@ -359,6 +433,37 @@ export const workspaceCSS = String.raw`
   border-color: var(--zb-pill-border);
 }
 .zb-workspace .zb-item-title { color: var(--zb-text); font-weight: 600; }
+.zb-workspace td[data-column='title'] { position: relative; }
+.zb-workspace .zb-title-actions {
+  position: absolute;
+  inset-inline-end: 0.35rem;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 0.2rem;
+  max-width: calc(100% - 0.7rem);
+  padding: 0.15rem;
+  background: var(--zb-surface);
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 16%);
+  opacity: 0;
+  pointer-events: none;
+}
+.zb-workspace tr:hover .zb-title-actions,
+.zb-workspace td[data-column='title']:focus-within .zb-title-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.zb-workspace .zb-title-action {
+  min-height: 1.4rem;
+  padding: 0.1rem 0.35rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--zb-muted);
+  white-space: nowrap;
+  font-size: 0.8em;
+}
 .zb-workspace .zb-cell-number, .zb-workspace .zb-cell-number > button {
   text-align: end;
   font-variant-numeric: tabular-nums;
@@ -380,7 +485,7 @@ export const workspaceCSS = String.raw`
   text-overflow: ellipsis;
   vertical-align: middle;
   border: 1px solid var(--zb-pill-border);
-  border-radius: 999px;
+  border-radius: 4px;
   background: var(--zb-pill-bg);
   color: var(--zb-text);
   padding: 0 0.38em;
@@ -459,9 +564,9 @@ export const workspaceCSS = String.raw`
   --zb-selected: light-dark(#e1ecff, #253e60);
 }
 .zb-workspace[data-appearance='terminal'] :is(
-  button, input, select, textarea, summary,
+  button, input, select, textarea,
   .zb-pane, .zb-warning, .zb-bulk, .zb-table-wrap, .zb-editor,
-  .zb-cell-pill, .zb-type-badge, .zb-pdf-mark
+  .zb-pdf-mark
 ) {
   border-radius: 0;
 }
@@ -485,7 +590,7 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace[data-appearance='modern'] :where(
   button:not(.zb-sync-badge), input:not([type='checkbox']), select, textarea,
-  summary, .zb-warning, .zb-bulk
+  .zb-warning, .zb-bulk
 ) {
   border-radius: 0.55rem;
 }

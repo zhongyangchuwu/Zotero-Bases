@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Catalog, Column, Filter, Property, Row, View } from '../src/contracts';
+import { groupRows } from '../src/grouping';
 import { cellValue, filterOperators, queryCatalog } from '../src/query';
 
 const properties: readonly Property[] = [
@@ -37,7 +38,7 @@ function view(
     name: 'View',
     scope: 'current',
     columns: ['title'],
-    sort: { column, direction },
+    sorts: [{ column, direction }],
     filters,
   };
 }
@@ -375,6 +376,71 @@ describe('catalog sorting', () => {
     expect(queryCatalog(titles, view([], 'property:Removed'), properties, 'sv').rows).toEqual(
       titles.rows,
     );
+  });
+
+  it('orders by two available keys and skips a removed key ahead of them', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { title: 'Alpha' }),
+        row(2, { title: 'Zulu', year: '2024' }),
+        row(3, { title: 'Alpha', year: '2024' }),
+        row(4, { title: 'Alpha', year: '2023' }),
+        row(5, { title: 'Bravo' }),
+        row(6, { title: 'alpha', year: '2024' }),
+      ],
+      tags: new Set(),
+    };
+    const sorted: View = {
+      ...view(),
+      sorts: [
+        { column: 'property:Removed', direction: 'asc' },
+        { column: 'year', direction: 'asc' },
+        { column: 'title', direction: 'desc' },
+      ],
+    };
+    expect(queryCatalog(items, sorted, properties, 'en').rows.map(({ id }) => id)).toEqual([
+      4, 2, 3, 6, 5, 1,
+    ]);
+    expect(queryCatalog(items, { ...sorted, sorts: [] }, properties, 'en').rows).toBe(items.rows);
+  });
+
+  it('uses three keys, keeps blanks last independently, and preserves order within groups', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, { title: 'Bravo', year: '2024', type: 'journal', extra: 'Confidence: 2' }),
+        row(2, { title: 'Zulu', type: 'book', extra: 'Confidence: 9' }),
+        row(3, { title: 'Alpha', year: '2024', type: 'journal' }),
+        row(4, { title: 'Charlie', year: '2024', type: 'book', extra: 'Confidence: 10' }),
+        row(5, { title: 'alpha', year: '2024', type: 'journal', extra: 'Confidence: 2' }),
+        row(6, { title: 'Alpha', year: '2024', type: 'book', extra: 'Confidence: 2.0' }),
+        row(7, { title: 'Alpha', type: 'book', extra: 'Confidence: 1' }),
+        row(8, { title: 'X-ray', year: '2020', type: 'journal', extra: 'Confidence: 30' }),
+        row(9, { title: 'Bravo', year: '2024', type: 'book', extra: 'Confidence: malformed' }),
+        row(10, { year: '2024', type: 'journal', extra: 'Confidence: 2' }),
+      ],
+      tags: new Set(),
+    };
+    const sorted: View = {
+      ...view(),
+      sorts: [
+        { column: 'year', direction: 'desc' },
+        { column: 'property:Confidence', direction: 'desc' },
+        { column: 'title', direction: 'asc' },
+      ],
+    };
+    const { rows } = queryCatalog(items, sorted, properties, 'en');
+    expect(rows.map(({ id }) => id)).toEqual([4, 5, 6, 1, 10, 3, 9, 8, 2, 7]);
+    const groups = groupRows(
+      rows,
+      { column: 'type', direction: 'asc' },
+      properties,
+      items.tags,
+      'en',
+    );
+    expect(groups?.map(({ value, rows }) => [value, rows.map(({ id }) => id)])).toEqual([
+      ['book', [4, 6, 9, 2, 7]],
+      ['journal', [5, 1, 10, 3, 8]],
+    ]);
   });
 
   it('sorts numeric cells exactly in both directions while keeping blanks last', () => {

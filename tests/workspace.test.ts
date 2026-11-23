@@ -47,7 +47,7 @@ const defaultView: View = {
     'property:Status',
     'property:Method',
   ],
-  sort: { column: 'title', direction: 'asc' },
+  sorts: [{ column: 'title', direction: 'asc' }],
   filters: [],
 };
 const sample: Row = {
@@ -230,12 +230,12 @@ function key(element: HTMLElement, name: string, options: KeyboardEventInit = {}
   );
 }
 
-function openDetails(root: ParentNode, title: string): void {
-  const summary = [...root.querySelectorAll<HTMLElement>('summary')].find(
-    (node) => (node.getAttribute('aria-label') ?? node.textContent) === title,
-  );
-  if (!summary) throw new Error(`Missing section ${title}`);
-  summary.click();
+function openTool(root: ParentNode, title: string): void {
+  get<HTMLButtonElement>(root, `button[aria-haspopup="dialog"][title="${title}"]`).click();
+}
+
+function header(root: ParentNode, column: Column): HTMLButtonElement {
+  return get(root, `button[data-header-column="${column}"]`);
 }
 
 function active(host: WorkspaceHost): View {
@@ -299,12 +299,13 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).scope).toBe('group');
     expect(host.load).toHaveBeenLastCalledWith('group');
 
-    openDetails(root, 'Columns');
+    openTool(root, 'Columns');
     get<HTMLInputElement>(root, 'input[data-focus="year"]').click();
     expect(active(host).columns).not.toContain('year');
-    changeSelection(root, 'Sort direction', 'desc');
-    expect(active(host).sort).toEqual({ column: 'title', direction: 'desc' });
-    openDetails(root, 'Filters');
+    openTool(root, 'Sort');
+    changeSelection(root, 'Sort direction · 1', 'desc');
+    expect(active(host).sorts).toEqual([{ column: 'title', direction: 'desc' }]);
+    openTool(root, 'Filters');
     click(root, 'Add condition');
     expect(active(host).filters).toEqual([{ column: 'title', operator: 'has', value: '' }]);
     changeSelection(root, 'Filter condition · 1', 'contains');
@@ -324,36 +325,179 @@ describe('Zotero Bases workspace', () => {
     field.blur();
     await settle();
 
-    openDetails(root, 'View actions');
+    openTool(root, 'View actions');
     click(root, 'Copy view');
     expect(active(host)).toMatchObject({ name: 'New view (copy)', scope: 'group' });
     expect(active(host).id).not.toBe(created.id);
     expect(active(host).filters[0]?.value).toBe('Alpha 1');
-    openDetails(root, 'View actions');
+    openTool(root, 'View actions');
     click(root, 'Rename view');
     const name = get<HTMLInputElement>(root, 'input[aria-label="View name"]');
     name.value = 'Reading list';
     key(name, 'Enter');
     expect(active(host).name).toBe('Reading list');
-    openDetails(root, 'View actions');
+    openTool(root, 'View actions');
     click(root, 'Delete view');
     expect(active(host).id).toBe(created.id);
     click(root, 'Library');
     expect(active(host).id).toBe('default');
   });
 
-  it('opens column visibility from the rightmost header and saves a hidden column selection', async () => {
+  it('keeps the header Columns popover anchored through order, visibility, and default resets', async () => {
     const { host } = fixture([sample], { ...defaultView, columns: ['title'] });
     const { root } = attach(host);
     await settle();
     const action = get<HTMLButtonElement>(root, 'thead th:last-child button');
     expect(action.getAttribute('aria-label')).toBe('Show columns');
     action.click();
-    const year = get<HTMLInputElement>(root, 'details[open] input[data-focus="year"]');
+    expect(get<HTMLInputElement>(root, 'input[data-focus="title"]').disabled).toBe(true);
+    const year = get<HTMLInputElement>(root, 'input[data-focus="year"]');
     expect(year.checked).toBe(false);
     year.click();
     expect(active(host).columns).toEqual(['title', 'year']);
     expect(cell(root, 'year', 1).textContent).toBe('2024');
+    click(root, 'Move up · Year');
+    expect(active(host).columns).toEqual(['year', 'title']);
+    click(root, 'Restore default column order');
+    expect(active(host).columns).toEqual(['title', 'year']);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(document.activeElement).toBe(get(root, 'thead th:last-child button'));
+
+    header(root, 'year').click();
+    click(root, 'Hide this column');
+    expect(active(host).columns).toEqual(['title']);
+    header(root, 'title').click();
+    expect(
+      [...root.querySelectorAll<HTMLButtonElement>('button')].find(
+        (control) => control.textContent === 'Hide this column',
+      )?.disabled,
+    ).toBe(true);
+  });
+
+  it('drags headers across an insertion boundary without opening the column menu', async () => {
+    const { host } = fixture([sample], { ...defaultView, columns: ['title', 'year', 'type'] });
+    const { root, teardown } = attach(host);
+    await settle();
+    const title = header(root, 'title');
+    const table = title.closest('tr')!;
+    for (const [index, column] of active(host).columns.entries()) {
+      const left = 40 + index * 100;
+      vi.spyOn(header(root, column).parentElement!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(left, 0, 100, 34),
+      );
+    }
+    const pointer = (kind: string, x: number) => {
+      const event = new MouseEvent(`pointer${kind}`, { bubbles: true, clientX: x });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      title.dispatchEvent(event);
+    };
+    pointer('down', 80);
+    pointer('move', 82);
+    expect(table.querySelector('[data-drop]')).toBeNull();
+    pointer('move', 220);
+    expect(header(root, 'type').parentElement?.dataset.drop).toBe('before');
+    pointer('up', 220);
+    title.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    expect(root.querySelector('.zb-popover')).toBeNull();
+    expect(active(host).columns).toEqual(['year', 'title', 'type']);
+    teardown();
+    const remount = attach(host).root;
+    await settle();
+    expect(
+      [...remount.querySelectorAll<HTMLButtonElement>('[data-header-column]')].map(
+        (button) => button.dataset.headerColumn,
+      ),
+    ).toEqual(['year', 'title', 'type']);
+  });
+
+  it('opens the selected property from its header and immediately repaints only its option', async () => {
+    const { host } = fixture();
+    const { root } = attach(host);
+    await settle();
+    header(root, 'property:Status').click();
+    click(root, 'Edit property');
+    const pill = () => get(cell(root, 'property:Status'), '.zb-cell-pill');
+    expect(pill().textContent).toBe('Reading');
+    const previous = pill().dataset.tone;
+    const color = previous === 'rose' ? 'green' : 'rose';
+    const label = color === 'rose' ? 'Rose' : 'Green';
+    click(root, `${label} · Status: Reading`);
+    await settle();
+    expect(pill().dataset.tone).toBe(color);
+    expect(host.settings().properties.find(({ key }) => key === 'Status')?.optionColors).toEqual({
+      Reading: color,
+    });
+    click(root, 'Automatic color · Status: Reading');
+    await settle();
+    expect(pill().dataset.tone).toBe(previous);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(document.activeElement).toBe(header(root, 'property:Status'));
+  });
+
+  it('promotes, appends, reverses, reorders, removes and clears sorts without duplicating fields', async () => {
+    const rows = [
+      sample,
+      { ...sample, id: 2, title: 'Beta' },
+      { ...sample, id: 3, title: 'Gamma', year: '2023' },
+    ];
+    const { host } = fixture(rows, {
+      ...defaultView,
+      sorts: [],
+      columns: ['title', 'year', 'type'],
+    });
+    const { root } = attach(host);
+    await settle();
+    header(root, 'year').click();
+    click(root, 'Sort ascending');
+    expect(header(root, 'year').textContent).toContain('↑');
+    header(root, 'title').click();
+    click(root, 'Add as secondary sort');
+    header(root, 'title').click();
+    click(root, 'Reverse sort direction');
+    expect(rowIds(root)).toEqual([3, 2, 1]);
+    expect(header(root, 'year').textContent).toContain('↑1');
+    expect(header(root, 'title').textContent).toContain('↓2');
+    expect(header(root, 'year').parentElement?.getAttribute('aria-sort')).toBe('ascending');
+    expect(header(root, 'title').parentElement?.hasAttribute('aria-sort')).toBe(false);
+    openTool(root, 'Sort');
+    click(root, 'Move up · Title');
+    expect(rowIds(root)).toEqual([3, 2, 1]);
+    expect(header(root, 'title').textContent).toContain('↓1');
+    click(root, 'Remove sort · Year');
+    expect(header(root, 'title').textContent).toBe('Title↓');
+    click(root, 'Add sort');
+    changeSelection(root, 'Sort field · 2', 'type');
+    expect(active(host).sorts).toEqual([
+      { column: 'title', direction: 'desc' },
+      { column: 'type', direction: 'asc' },
+    ]);
+    click(root, 'Clear sorting');
+    expect(active(host).sorts).toEqual([]);
+    expect(rowIds(root)).toEqual([1, 2, 3]);
+    expect(root.querySelector('.zb-sort-indicator')).toBeNull();
+  });
+
+  it('returns focus from a popover without clearing search or the selected row', async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = attach(fixture().host);
+      await settle();
+      const search = get<HTMLInputElement>(root, '[role=searchbox]');
+      type(search, 'Alpha');
+      await vi.advanceTimersByTimeAsync(300);
+      rowSelection(root, 1).click();
+      openTool(root, 'Filters');
+      const filters = get(root, 'button[title="Filters"]');
+      expect(focusedKey('Escape')).toBe(false);
+      expect(document.activeElement).toBe(filters);
+      expect(search.value).toBe('Alpha');
+      expect(rowSelection(root, 1).checked).toBe(true);
+      expect(focusedKey('Escape')).toBe(false);
+      expect(search.value).toBe('');
+      expect(rowSelection(root, 1).checked).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('searches unmounted rows and combines the result with saved filters and grouping', async () => {
@@ -413,7 +557,7 @@ describe('Zotero Bases workspace', () => {
       const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }]);
       const { root } = attach(host);
       await settle();
-      const trigger = get<HTMLButtonElement>(root, 'button[aria-controls][aria-expanded="false"]');
+      const trigger = get<HTMLButtonElement>(root, '.zb-search-toggle');
       const search = get<HTMLInputElement>(root, '[role=searchbox]');
       const field = get(root, `#${trigger.getAttribute('aria-controls')}`);
       const grid = get(root, '.zb-table-wrap');
@@ -527,7 +671,7 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).columnWidths).toBeUndefined();
     pointer('pointerup', 285);
     expect(active(host).columnWidths?.title).toBe(start + 85);
-    expect(active(host).sort).toEqual(defaultView.sort);
+    expect(active(host).sorts).toEqual(defaultView.sorts);
     teardown();
 
     const remount = attach(host).root;
@@ -651,7 +795,7 @@ describe('Zotero Bases workspace', () => {
   it('defines properties, renames their labels and offers two inline deletion actions with a partial summary', async () => {
     const { host } = fixture([sample, { ...sample, id: 2, writable: false }]);
     const { root } = attach(host);
-    openDetails(root, 'Properties');
+    openTool(root, 'Properties');
     type(get(root, 'input[aria-label="Property key"]'), 'Priority');
     changeSelection(root, 'Property type', 'multi-select');
     get<HTMLTextAreaElement>(root, 'textarea[aria-label="Options (one per line)"]').value =
@@ -741,8 +885,9 @@ describe('Zotero Bases workspace', () => {
     expect(viewport.scrollTop).toBeGreaterThan(0);
     focusedKey('u', { ctrlKey: true });
     expect(document.activeElement).toBe(cell(root, 'title', 1));
-    get<HTMLButtonElement>(root, 'button[aria-label="Sort by · Title"]').click();
-    expect(active(host).sort).toEqual({ column: 'title', direction: 'desc' });
+    header(root, 'title').click();
+    click(root, 'Sort descending');
+    expect(active(host).sorts).toEqual([{ column: 'title', direction: 'desc' }]);
     expect(rowIds(root)[0]).toBe(113);
   });
 
@@ -828,7 +973,7 @@ describe('Zotero Bases workspace', () => {
   it('accepts the reserved key hint without submitting or discarding property options', async () => {
     const { host } = fixture();
     const { root } = attach(host);
-    openDetails(root, 'Properties');
+    openTool(root, 'Properties');
     const field = get<HTMLInputElement>(root, 'input[aria-label="Property key"]');
     const values = get<HTMLTextAreaElement>(root, 'textarea[aria-label="Options (one per line)"]');
     type(field, 'Ordinary custom key');
@@ -874,7 +1019,7 @@ describe('Zotero Bases workspace', () => {
     );
     const { root } = attach(host);
     await settle();
-    openDetails(root, 'Grouping');
+    openTool(root, 'Grouping');
     const grouping = get<HTMLSelectElement>(root, 'select[aria-label="Group by"]');
     expect(Array.from(grouping.options, ({ value }) => value)).toEqual([
       '',
@@ -1029,10 +1174,11 @@ describe('Zotero Bases workspace', () => {
     expect(rowSelection(root, 2).checked).toBe(true);
     expect(rowSelection(root, 3).checked).toBe(false);
     expect(selectAllInput(root).indeterminate).toBe(true);
-    get<HTMLButtonElement>(root, 'button[aria-label="Sort by · Title"]').click();
+    header(root, 'title').click();
+    click(root, 'Sort descending');
     expect(rowSelection(root, 2).checked).toBe(true);
 
-    openDetails(root, 'View actions');
+    openTool(root, 'View actions');
     click(root, 'Copy view');
     expect(bulk.hidden).toBe(true);
     rowSelection(root, 2).click();
@@ -1040,7 +1186,7 @@ describe('Zotero Bases workspace', () => {
     await settle();
     expect(bulk.hidden).toBe(true);
     rowSelection(root, 2).click();
-    openDetails(root, 'Filters');
+    openTool(root, 'Filters');
     click(root, 'Add condition');
     expect(bulk.hidden).toBe(true);
     changeSelection(root, 'Filter condition · 1', 'contains');

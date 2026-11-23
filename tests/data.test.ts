@@ -521,6 +521,70 @@ describe('Zotero Bases host', () => {
     expect(failedLoad.saveTx).not.toHaveBeenCalled();
   });
 
+  it('sets option colors on the definition only and keeps them through option edits', async () => {
+    const extra = 'Reading Stage: To Read; Done\r\nDOI: untouched';
+    const item = nativeItem(1, 1, extra);
+    const { host, loadDataTypes, prefs } = harness([item]);
+    await host.change({ kind: 'define', property: stage });
+    await expect(
+      host.change({
+        kind: 'set-option-color',
+        key: 'reading stage',
+        option: ' To Read ',
+        color: 'amber',
+      }),
+    ).resolves.toEqual({ changed: 0, skipped: 0 });
+    expect(loadDataTypes).not.toHaveBeenCalled();
+    expect(item.saveTx).not.toHaveBeenCalled();
+    expect(item.savedExtra()).toBe(extra);
+    expect(JSON.parse(prefs.get(SCHEMA_PREF, true) as string)).toEqual([
+      { ...stage, optionColors: { 'To Read': 'amber' } },
+    ]);
+    await expect(
+      host.change({ kind: 'set-option-color', key: stage.key, option: 'Absent', color: 'sky' }),
+    ).rejects.toThrow(/Option no longer exists/);
+
+    const stale = host.settings().properties[0]!;
+    await host.change({
+      kind: 'set-option-color',
+      key: stage.key,
+      option: 'To Read',
+      color: 'violet',
+    });
+    await host.change({ kind: 'set-option-color', key: stage.key, option: 'Done', color: 'green' });
+    await host.change({
+      kind: 'define',
+      property: { ...stale, options: [...stage.options, 'Later'] },
+    });
+    expect(host.settings().properties).toEqual([
+      {
+        ...stage,
+        options: ['To Read', 'Done', 'Later'],
+        optionColors: { 'To Read': 'violet', Done: 'green' },
+      },
+    ]);
+
+    await host.change({
+      kind: 'rename-option',
+      key: stage.key,
+      previous: 'To Read',
+      next: ' Cafe\u0301 ',
+    });
+    expect(host.settings().properties[0]?.optionColors).toEqual({ Café: 'violet', Done: 'green' });
+    expect(item.savedExtra()).toBe('Reading Stage: Café; Done\r\nDOI: untouched');
+    await host.change({ kind: 'delete-option', key: stage.key, option: 'Done', clean: false });
+    expect(host.settings().properties[0]?.optionColors).toEqual({ Café: 'violet' });
+    await host.change({
+      kind: 'set-option-color',
+      key: stage.key,
+      option: 'Café',
+      color: undefined,
+    });
+    expect(host.settings().properties).toEqual([{ ...stage, options: ['Café', 'Later'] }]);
+    expect(item.saveTx).toHaveBeenCalledTimes(1);
+    expect(item.savedExtra()).toBe('Reading Stage: Café; Done\r\nDOI: untouched');
+  });
+
   it('supports definition-only deletion and targeted option and malformed field cleanup', async () => {
     const item = nativeItem(
       1,
