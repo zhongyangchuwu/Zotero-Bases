@@ -18,6 +18,16 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(value, max));
 }
 
+function hasOpenNativeSelect(panel: HTMLElement): boolean {
+  // Privileged Gecko sets this on the owning HTML select while its XUL menu is open.
+  for (const select of panel.querySelectorAll<
+    HTMLSelectElement & { readonly openInParentProcess?: boolean }
+  >('select')) {
+    if (select.openInParentProcess) return true;
+  }
+  return false;
+}
+
 export function createPopover(surface: HTMLElement) {
   const doc = surface.ownerDocument;
   const view = doc.defaultView;
@@ -120,6 +130,16 @@ export function createPopover(surface: HTMLElement) {
     if (!open || !view) return;
     const path = event.composedPath();
     if (path.includes(open.anchor) || path.includes(open.panel)) return;
+    // Windows sends the option press to Gecko's separate XUL menu before the
+    // HTML select receives change. Keep its owning panel mounted for that commit.
+    const menu = doc.getElementById('ContentSelectDropdownPopup');
+    if (
+      menu?.namespaceURI === 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul' &&
+      menu.localName === 'menupopup' &&
+      path.includes(menu) &&
+      hasOpenNativeSelect(open.panel)
+    )
+      return;
     const shouldRestore = canReturnFocus(open.panel);
     close(false);
     if (shouldRestore) {
@@ -257,6 +277,7 @@ export function createPopover(surface: HTMLElement) {
       event.altKey
     )
       return false;
+    if (hasOpenNativeSelect(current.panel)) return false;
     event.preventDefault();
     event.stopImmediatePropagation();
     close();
