@@ -32,7 +32,7 @@ const view: View = {
 };
 
 describe('configuration backup', () => {
-  it('exports only portable schema and views and restores them without changing other preferences', () => {
+  it('exports schema and views and restores them without changing other preferences', () => {
     const source = preferences();
     const config = createConfig(source.prefs, () => 'user', validateProperty);
     const mainView = { ...view, id: 'home' };
@@ -53,6 +53,37 @@ describe('configuration backup', () => {
     expect(store.read().appearance).toBe('modern');
   });
 
+  it('round-trips local tag color rules, preserves them on old imports, and clears them on []', () => {
+    const source = preferences();
+    const backup = createConfigurationBackup(source.prefs, validateProperty);
+    const rules = [
+      { kind: 'prefix', name: ' Café: ', color: 'orange' },
+      { kind: 'tag', name: 'Cafe\u0301:Notes', color: 'red' },
+    ];
+    const old = { schema: [property], views: [view] };
+    expect(backup.importJSON(JSON.stringify({ ...old, tagColors: rules }))).toEqual({
+      properties: 1,
+      views: 1,
+    });
+    const exported = backup.exportJSON();
+    const expected = {
+      ...old,
+      tagColors: [
+        { kind: 'prefix', name: 'Café:', color: 'orange' },
+        { kind: 'tag', name: 'Café:Notes', color: 'red' },
+      ],
+    };
+    expect(JSON.parse(exported)).toEqual(expected);
+
+    const target = createConfigurationBackup(preferences().prefs, validateProperty);
+    expect(target.importJSON(exported)).toEqual({ properties: 1, views: 1 });
+    expect(target.exportJSON()).toBe(exported);
+    target.importJSON(JSON.stringify({ ...old, schema: [] }));
+    expect(JSON.parse(target.exportJSON())).toEqual({ ...expected, schema: [] });
+    target.importJSON(JSON.stringify({ ...old, tagColors: [] }));
+    expect(JSON.parse(target.exportJSON())).toEqual({ ...old, tagColors: [] });
+  });
+
   it('does not initialize preferences on opening or exporting a backup', () => {
     const { prefs, values } = preferences();
     const backup = createConfigurationBackup(prefs, validateProperty);
@@ -64,12 +95,13 @@ describe('configuration backup', () => {
     expect(values.size).toBe(0);
   });
 
-  it('leaves schema and views untouched when any part of a backup is invalid', () => {
+  it('leaves all portable preferences untouched when any part of a backup is invalid', () => {
     const { prefs, values } = preferences();
     const config = createConfig(prefs, () => 'user', validateProperty);
     const backup = createConfigurationBackup(prefs, validateProperty);
     config.writeSchema([property]);
     config.writeViews({ views: [view], active: view.id });
+    config.setTagColor({ kind: 'set-tag-color', target: 'tag', name: 'Saved', color: 'teal' });
     const before = [...values];
     const invalid = [
       '{',
@@ -78,7 +110,21 @@ describe('configuration backup', () => {
       JSON.stringify({ schema: [{ ...property, key: 'DOI' }], views: [view] }),
       JSON.stringify({ schema: [property, { ...property, key: 'reading stage' }], views: [view] }),
       JSON.stringify({ schema: [], views: [view, { ...view, density: 'unknown' }] }),
-      JSON.stringify({ schema: [{ ...property, optionColors: { Done: 'red' } }], views: [view] }),
+      JSON.stringify({ schema: [{ ...property, optionColors: { Done: 'pink' } }], views: [view] }),
+      ...[
+        null,
+        {},
+        [{ kind: 'unknown', name: 'Reading', color: 'sky' }],
+        [{ kind: 'prefix', name: ' ', color: 'sky' }],
+        [{ kind: 'tag', name: 42, color: 'sky' }],
+        [{ kind: 'tag', name: 'Reading', color: '#abcdef' }],
+        [
+          { kind: 'prefix', name: 'Café:', color: 'violet' },
+          { kind: 'prefix', name: 'Cafe\u0301:', color: 'amber' },
+        ],
+      ].map((tagColors) =>
+        JSON.stringify({ schema: [], views: [{ ...view, name: 'Different' }], tagColors }),
+      ),
     ];
     for (const json of invalid) {
       expect(backup.importJSON(json)).toBeUndefined();

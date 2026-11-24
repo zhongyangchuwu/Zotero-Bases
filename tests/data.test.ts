@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SCHEMA_PREF, VIEWS_PREF } from '../src/config';
+import { SCHEMA_PREF, TAG_COLORS_PREF, VIEWS_PREF } from '../src/config';
 import { createWorkspaceHost } from '../src/data';
 import type { LibraryOwner, Prefs, ZoteroData } from '../src/data';
-import type { Property } from '../src/contracts';
+import type { AttachmentKind, Property } from '../src/contracts';
 
 type Item = Awaited<ReturnType<ZoteroData['Items']['getAll']>>[number];
 type Collection = ReturnType<ZoteroData['Collections']['getByLibrary']>[number];
@@ -70,7 +70,8 @@ function nativeItem(
     readOnly?: boolean;
     fail?: boolean;
     parentID?: number;
-    pdf?: boolean;
+    dateAdded?: string;
+    attachment?: AttachmentKind | 'linked-url';
     regular?: boolean;
     typeID?: number;
     fields?: Readonly<Record<string, string>>;
@@ -98,13 +99,16 @@ function nativeItem(
     parentID: flags.parentID ?? false,
     deleted: flags.deleted ?? false,
     isFeedItem: flags.feed ?? false,
-    dateAdded: '2026-05-24 20:52:26',
+    dateAdded: flags.dateAdded ?? '2026-05-24 20:52:26',
     dateModified: '2026-05-26 09:02:15',
     attachmentLastRead: flags.lastRead ?? (flags.parentID ? null : undefined),
     itemTypeID,
-    isRegularItem: () => flags.regular ?? true,
+    isRegularItem: () => flags.regular ?? !flags.attachment,
     isEditable: () => !flags.readOnly,
-    isPDFAttachment: () => flags.pdf ?? false,
+    isPDFAttachment: () => flags.attachment === 'pdf',
+    isEPUBAttachment: () => flags.attachment === 'epub',
+    isSnapshotAttachment: () => flags.attachment === 'snapshot',
+    isFileAttachment: () => !!flags.attachment && flags.attachment !== 'linked-url',
     getField(field: string | number, unformatted = false) {
       const name = fieldName(field);
       if (!fieldsByType.get(itemTypeID)?.includes(name))
@@ -148,9 +152,7 @@ function nativeItem(
     getItemLastRead(): number | null {
       return null;
     },
-    async getBestAttachment(): Promise<Item | false> {
-      return flags.best ?? false;
-    },
+    getBestAttachment: vi.fn(async (): Promise<Item | false> => flags.best ?? false),
     saveTx: vi.fn(async () => {
       if (flags.fail) {
         extra = onDisk;
@@ -292,6 +294,7 @@ function harness(
       (collection) => collection.libraryID === id && (includeTrashed || !collection.deleted),
     ),
   );
+  const getColors = vi.fn((_id: number) => new Map<string, { color: string; position: number }>());
   const zotero: ZoteroData = {
     Libraries: {
       userLibraryID: 1,
@@ -315,6 +318,7 @@ function harness(
         if (id === 8) return Promise.resolve([{ tag: 'automatic' }, { tag: 'elsewhere' }]);
         return [{ tag: id === 11 ? 'Feed only' : 'Other group' }];
       },
+      getColors,
     },
     ItemFields: {
       getAll: () => [...fieldNames, 'newZoteroField'].map((name) => ({ name })),
@@ -327,7 +331,10 @@ function harness(
       isValidForType: (field, typeID) =>
         fieldsByType.get(typeID)?.includes(fieldName(field)) ?? false,
     },
-    ItemTypes: { getLocalizedString: () => 'Journal Article' },
+    ItemTypes: {
+      getLocalizedString: () => 'Journal Article',
+      getName: (id) => (id === book ? 'book' : 'journalArticle'),
+    },
     Utilities: {
       Internal: {
         extractExtraFields(extra) {
@@ -368,10 +375,14 @@ function harness(
     loadDataTypes,
     getAsyncCalls,
     getByLibrary,
+    getColors,
     prefObservers,
     nativeObservers,
     emit(action: string, type: string, ids: readonly (string | number)[]) {
-      for (const { observer, types } of nativeObservers.values())
+      const observers = [...nativeObservers.values()].sort(
+        (a, b) => (a.priority ?? 100) - (b.priority ?? 100),
+      );
+      for (const { observer, types } of observers)
         if (types.includes(type)) observer.notify(action, type, ids);
     },
     host: createWorkspaceHost(zotero, prefs, owner),
@@ -386,7 +397,7 @@ const stage = {
 
 describe('Zotero Bases host', () => {
   it('uses native scope identifiers and loads a global native tag catalog independent of rows', async () => {
-    const pdf = nativeItem(3, 8, '', { parentID: 1, pdf: true, regular: false });
+    const pdf = nativeItem(3, 8, '', { parentID: 1, attachment: 'pdf' });
     const paper = nativeItem(1, 8, 'Reading Stage: To Read', { attachments: [3], best: pdf });
     const trashed = nativeItem(2, 8, '', { deleted: true });
     const feed = nativeItem(5, 8, '', { feed: true });
@@ -413,8 +424,10 @@ describe('Zotero Bases host', () => {
           year: '2025',
           source: 'Science',
           type: 'Journal Article',
+          itemType: 'journalArticle',
           added: '2026-05-24 20:52:26',
           pdf: true,
+          attachment: 'pdf',
           tags: ['automatic'],
           extra: 'Reading Stage: To Read',
           writable: true,
@@ -428,20 +441,79 @@ describe('Zotero Bases host', () => {
     ]);
   });
 
+  it('copies native tag colors once per represented library and refreshes after the native cache', async () => {
+    const personal = nativeItem(1, 1);
+    const groupA = nativeItem(2, 8);
+    const groupB = nativeItem(3, 8);
+    const { host, getColors, zotero, emit } = harness([personal, groupA, groupB], [groupA, groupB]);
+    const groupColor = { color: '#A1B2C3', position: 0 };
+    const group = new Map([
+      ['Cafe\u0301', groupColor],
+      ['café', { color: '#fff', position: 1 }],
+      ['Invalid hex', { color: '#00000G', position: 2 }],
+      ['Not hex', { color: 'var(--blocked)', position: 3 }],
+    ]);
+    const user = new Map([['Café', { color: '#224466', position: 0 }]]);
+    getColors.mockImplementation((id) => (id === 8 ? group : user));
+
+    const initial = await host.load('group:73/CHILD007');
+    expect(getColors.mock.calls).toEqual([[8]]);
+    const copied = initial.rows[0]?.nativeTagColors;
+    expect(copied).toEqual(
+      new Map([
+        ['Café', '#A1B2C3'],
+        ['café', '#fff'],
+      ]),
+    );
+    expect(copied).not.toBe(group);
+    expect(initial.rows[1]?.nativeTagColors).toBe(copied);
+
+    getColors.mockClear();
+    const all = await host.load('all');
+    expect(getColors.mock.calls).toEqual([[1], [8]]);
+    expect(all.rows.find(({ id }) => id === personal.id)?.nativeTagColors?.get('Café')).toBe(
+      '#224466',
+    );
+
+    const listener = vi.fn();
+    const stop = host.subscribe((kind) => listener(kind, groupColor.color));
+    zotero.Notifier.registerObserver(
+      {
+        notify(_action, _type, ids) {
+          if (!ids.includes('8/tagColors')) return;
+          groupColor.color = '#CCDD00';
+          emit('redraw', 'item', [groupA.id, groupB.id]);
+        },
+      },
+      ['setting'],
+      'tags',
+    );
+    emit('modify', 'setting', ['8/unrelated']);
+    expect(listener).not.toHaveBeenCalled();
+    emit('modify', 'setting', ['8/tagColors']);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('data', '#CCDD00');
+    expect(copied?.get('Café')).toBe('#A1B2C3');
+    const updated = await host.load('group:73/CHILD007');
+    expect(updated.rows[0]?.nativeTagColors?.get('Café')).toBe('#CCDD00');
+    stop();
+  });
+
   it('loads 322 Zotero rows in batches with type-valid bibliographic fields and cached child metadata', async () => {
     const recent = Date.UTC(2026, 4, 28, 12, 30) / 1_000;
     const pdf = nativeItem(500, 1, '', {
       parentID: 1,
-      pdf: true,
-      regular: false,
+      attachment: 'pdf',
       lastRead: recent,
     });
-    const snapshot = nativeItem(501, 1, '', { parentID: 1, regular: false, lastRead: recent - 60 });
+    const snapshot = nativeItem(501, 1, '', {
+      parentID: 1,
+      attachment: 'snapshot',
+      lastRead: recent - 60,
+    });
     const trashedPDF = nativeItem(502, 1, '', {
       parentID: 1,
-      regular: false,
       deleted: true,
-      pdf: true,
+      attachment: 'pdf',
       lastRead: recent + 60,
     });
     const paper = nativeItem(1, 1, '', {
@@ -567,6 +639,7 @@ describe('Zotero Bases host', () => {
       rights: 'CC BY 4.0',
     });
     expect(rows.get(volume.id)).toMatchObject({
+      itemType: 'book',
       source: 'Books',
       date: '0000-00-00 in press',
       year: '',
@@ -609,7 +682,7 @@ describe('Zotero Bases host', () => {
 
   it('invalidates memberships and changed last-read timestamps after the native read observer', async () => {
     const memberships: number[] = [];
-    const pdf = nativeItem(2, 8, '', { parentID: 1, pdf: true, regular: false });
+    const pdf = nativeItem(2, 8, '', { parentID: 1, attachment: 'pdf' });
     const paper = nativeItem(1, 8, '', { attachments: [2], collections: memberships });
     const { host, emit, nativeObservers, getAsyncCalls } = harness([paper, pdf]);
     expect((await host.load('group:73')).rows[0]).toMatchObject({ collections: [], lastRead: '' });
@@ -998,29 +1071,159 @@ describe('Zotero Bases host', () => {
     expect(locked.savedExtra()).toBe('Score Test: 7');
   });
 
-  it('persists a view immediately even during an in-progress schema cleanup', async () => {
+  it('persists and observes view and tag-color changes immediately during schema cleanup', async () => {
     const item = nativeItem(1, 1, 'Reading Stage: To Read');
-    const { host } = harness([item]);
+    const { host, owner, prefs, zotero } = harness([item]);
+    const other = createWorkspaceHost(zotero, prefs, owner);
+    const listener = vi.fn();
+    const stop = other.subscribe(listener);
     await host.change({ kind: 'define', property: stage });
     const saveStarted = new Promise<() => void>((start) => {
       item.saveTx.mockImplementationOnce(() => new Promise<void>((resume) => start(resume)));
     });
     const cleanup = host.change({ kind: 'delete-property', key: stage.key, clean: true });
     const resume = await saveStarted;
+    listener.mockClear();
     try {
       const settings = host.settings();
       const view = { ...settings.views[0]!, name: 'No waiting' };
       const saveView = host.change({ kind: 'views', views: [view], active: view.id });
       expect(host.settings().views[0]?.name).toBe('No waiting');
       await saveView;
+      const setColor = host.change({
+        kind: 'set-tag-color',
+        target: 'prefix',
+        name: 'Café:',
+        color: 'orange',
+      });
+      expect(other.settings().tagColors).toEqual([
+        { kind: 'prefix', name: 'Café:', color: 'orange' },
+      ]);
+      await setColor;
+      const resetColor = other.change({
+        kind: 'set-tag-color',
+        target: 'prefix',
+        name: 'Cafe\u0301:',
+        color: undefined,
+      });
+      expect(host.settings().tagColors).toEqual([]);
+      await resetColor;
+      expect(listener.mock.calls).toEqual([['settings'], ['settings'], ['settings']]);
     } finally {
+      stop();
       resume();
       await cleanup;
     }
   });
 
+  it('displays and opens the same ranked file without a per-row best-attachment query', async () => {
+    const url = 'https://example.org/paper';
+    function child(
+      id: number,
+      parentID: number,
+      attachment: AttachmentKind | 'linked-url',
+      day: number,
+      url?: string,
+    ) {
+      return nativeItem(id, 1, '', {
+        parentID,
+        attachment,
+        dateAdded: `2026-05-${String(day).padStart(2, '0')} 10:00:00`,
+        fields: url ? { url } : {},
+      });
+    }
+    const betterPDF = child(10, 1, 'pdf', 5, url);
+    const pdfFiles = [
+      child(11, 1, 'pdf', 5, url), // same date and URL, larger ID
+      child(12, 1, 'pdf', 6, url),
+      child(13, 1, 'pdf', 1, 'https://example.org/other'),
+      child(14, 1, 'epub', 1, url),
+      betterPDF,
+    ];
+    const pdfParent = nativeItem(1, 1, '', {
+      fields: { url },
+      attachments: pdfFiles.map(({ id }) => id),
+      best: pdfFiles[0],
+    });
+    const epub = child(20, 2, 'epub', 2, url);
+    const htmlWithoutMatch = child(21, 2, 'snapshot', 1, 'https://example.org/other');
+    const ebook = nativeItem(2, 1, '', {
+      fields: { url },
+      attachments: [htmlWithoutMatch.id, epub.id],
+      best: htmlWithoutMatch,
+    });
+    const html = child(30, 3, 'snapshot', 1);
+    const page = nativeItem(3, 1, '', { attachments: [html.id] });
+    const file = child(40, 4, 'file', 1);
+    const document = nativeItem(4, 1, '', { attachments: [file.id] });
+    const link = child(50, 5, 'linked-url', 1, url);
+    const deleted = child(51, 5, 'pdf', 1, url);
+    deleted.deleted = true;
+    const linksOnly = nativeItem(5, 1, '', { attachments: [link.id, deleted.id], best: link });
+    const parents = [pdfParent, ebook, page, document, linksOnly];
+    const { host, owner, getAsyncCalls, loadDataTypes } = harness([
+      ...parents,
+      ...pdfFiles,
+      epub,
+      htmlWithoutMatch,
+      html,
+      file,
+      link,
+      deleted,
+    ]);
+
+    const catalog = await host.load('user');
+    expect(catalog.rows.map(({ attachment, pdf }) => [attachment, pdf])).toEqual([
+      ['pdf', true],
+      ['epub', false],
+      ['snapshot', false],
+      ['file', false],
+      [undefined, false],
+    ]);
+    expect(getAsyncCalls).toHaveLength(1);
+    expect(loadDataTypes).toHaveBeenCalledTimes(2);
+    const [urlItems, dataTypes] = loadDataTypes.mock.calls[1]!;
+    expect(new Set(urlItems.map(({ id }) => id))).toEqual(new Set([10, 11, 12, 13, 20, 21]));
+    expect(dataTypes).toEqual(['itemData']);
+    for (const { id } of parents) await host.openItem(id, 'attachment');
+    for (const { getBestAttachment } of parents) expect(getBestAttachment).not.toHaveBeenCalled();
+    expect(owner.ZoteroPane.viewAttachment.mock.calls).toEqual([[10], [20], [30], [40]]);
+    expect(owner.ZoteroPane.selectItem.mock.calls).toEqual([[5]]);
+
+    betterPDF.deleted = true;
+    await host.openItem(pdfParent.id, 'attachment');
+    expect(owner.ZoteroPane.viewAttachment).toHaveBeenCalledTimes(4);
+    expect(owner.ZoteroPane.selectItem).toHaveBeenLastCalledWith(pdfParent.id);
+  });
+
+  it('preserves the newer catalog attachment cache and uses native ranking for an uncached click', async () => {
+    const pdf = nativeItem(10, 1, '', { parentID: 1, attachment: 'pdf' });
+    const paper = nativeItem(1, 1, '', { attachments: [pdf.id], best: pdf });
+    const epub = nativeItem(20, 8, '', { parentID: 2, attachment: 'epub' });
+    const ebook = nativeItem(2, 8, '', { attachments: [epub.id] });
+    const { host, owner, zotero } = harness([paper, pdf, ebook, epub]);
+    let release!: (items: Item[]) => void;
+    const delayed = new Promise<Item[]>((resolve) => {
+      release = resolve;
+    });
+    const getAll = zotero.Items.getAll;
+    vi.spyOn(zotero.Items, 'getAll').mockImplementation((id, topLevel, deleted) =>
+      id === 1 ? delayed : getAll(id, topLevel, deleted),
+    );
+
+    const older = host.load('user');
+    expect((await host.load('group:73')).rows[0]?.attachment).toBe('epub');
+    release([paper]);
+    await older;
+    await host.openItem(ebook.id, 'attachment');
+    await host.openItem(paper.id, 'attachment');
+    expect(ebook.getBestAttachment).not.toHaveBeenCalled();
+    expect(paper.getBestAttachment).toHaveBeenCalledTimes(1);
+    expect(owner.ZoteroPane.viewAttachment.mock.calls).toEqual([[20], [10]]);
+  });
+
   it('opens the native best PDF or locates the regular item and detaches all observers', async () => {
-    const pdf = nativeItem(3, 8, '', { parentID: 1, pdf: true, regular: false });
+    const pdf = nativeItem(3, 8, '', { parentID: 1, attachment: 'pdf' });
     const paper = nativeItem(1, 8, '', { attachments: [3], best: pdf });
     const noPDF = nativeItem(2, 8);
     const { host, owner, nativeObservers, prefObservers, prefs } = harness([paper, noPDF, pdf]);
@@ -1030,8 +1233,8 @@ describe('Zotero Bases host', () => {
     expect(owner.ZoteroPane.viewAttachment.mock.calls).toEqual([[3]]);
     expect(owner.ZoteroPane.selectItem.mock.calls).toEqual([[2], [1]]);
 
-    const snapshot = nativeItem(4, 8, '', { parentID: 5, regular: false });
-    const otherPDF = nativeItem(6, 8, '', { parentID: 5, pdf: true, regular: false });
+    const snapshot = nativeItem(4, 8, '', { parentID: 5, attachment: 'snapshot' });
+    const otherPDF = nativeItem(6, 8, '', { parentID: 5, attachment: 'pdf' });
     const mixed = nativeItem(5, 8, '', { attachments: [4, 6], best: snapshot });
     const mixedLibrary = harness([snapshot, mixed, otherPDF]);
     await mixedLibrary.host.openItem(5, true);
@@ -1057,6 +1260,7 @@ describe('Zotero Bases host', () => {
     unsubscribe();
     entry.observer.notify('modify', 'item', [1]);
     prefs.set(VIEWS_PREF, '{}', true);
+    prefs.set(TAG_COLORS_PREF, '[]', true);
     expect(listener).toHaveBeenCalledTimes(2);
     expect(nativeObservers.size).toBe(0);
     expect(prefObservers.size).toBe(0);

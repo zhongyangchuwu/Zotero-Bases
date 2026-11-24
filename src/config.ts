@@ -4,6 +4,7 @@ import {
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTH,
   NATIVE_COLUMN_BY_KEY,
+  OPTION_COLORS,
 } from './contracts';
 import type {
   Column,
@@ -16,12 +17,14 @@ import type {
   Property,
   PropertyType,
   SortRule,
+  TagColorRule,
   View,
 } from './contracts';
 import { readProperty, writeProperty } from './extra';
 
 export const SCHEMA_PREF = 'extensions.zotero-bases.schema.v1';
 export const VIEWS_PREF = 'extensions.zotero-bases.views.v1';
+export const TAG_COLORS_PREF = 'extensions.zotero-bases.tagColors.v1';
 
 export interface Prefs {
   get(name: string, global: true): unknown;
@@ -31,7 +34,8 @@ export interface Prefs {
 }
 
 type Validate = (property: Property) => Property;
-type SchemaChange = Exclude<ConfigChange, { kind: 'views' }>;
+type TagColorChange = Extract<ConfigChange, { kind: 'set-tag-color' }>;
+type SchemaChange = Exclude<ConfigChange, { kind: 'views' } | TagColorChange>;
 type ExtraEdit = (extra: string) => string;
 
 const propertyTypes: Record<PropertyType, true> = {
@@ -231,6 +235,35 @@ function property(raw: unknown, validate: Validate): Property | undefined {
   }
 }
 
+function tagColorKind(value: unknown): value is TagColorRule['kind'] {
+  return value === 'tag' || value === 'prefix';
+}
+
+function tagColorKey(value: unknown): value is OptionColorKey {
+  return typeof value === 'string' && (OPTION_COLORS as readonly string[]).includes(value);
+}
+
+export function decodeTagColors(value: unknown): TagColorRule[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rules: TagColorRule[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    if (
+      !object(raw) ||
+      !tagColorKind(raw.kind) ||
+      !tagColorKey(raw.color) ||
+      typeof raw.name !== 'string'
+    )
+      return undefined;
+    const name = raw.name.trim().normalize('NFC');
+    const key = `${raw.kind}:${name}`;
+    if (!name || seen.has(key)) return undefined;
+    seen.add(key);
+    rules.push({ kind: raw.kind, name, color: raw.color });
+  }
+  return rules;
+}
+
 /** A malformed remote record must not be applied as a partial library configuration. */
 export function decodeSyncSnapshot(value: unknown, validate: Validate) {
   if (
@@ -310,16 +343,42 @@ export function createConfig(
     return [...properties.values()];
   }
 
+  function readTagColors(): TagColorRule[] | undefined {
+    return decodeTagColors(parse(prefs.get(TAG_COLORS_PREF, true)));
+  }
+
+  function writeTagColors(rules: readonly TagColorRule[]): void {
+    prefs.set(TAG_COLORS_PREF, JSON.stringify(rules), true);
+  }
+
+  function setTagColor({ target, name: raw, color }: TagColorChange): void {
+    const name = typeof raw === 'string' && raw.trim().normalize('NFC');
+    if (!name || !tagColorKind(target) || (color !== undefined && !tagColorKey(color))) {
+      throw new Error('Invalid tag color rule');
+    }
+    const rules = readTagColors() ?? [];
+    const index = rules.findIndex((rule) => rule.kind === target && rule.name === name);
+    if (rules[index]?.color === color) return;
+    if (color === undefined) rules.splice(index, 1);
+    else if (index === -1) rules.push({ kind: target, name, color });
+    else rules[index] = { kind: target, name, color };
+    writeTagColors(rules);
+  }
+
   return {
     readProperties,
     settings(): Preferences {
       const saved = parse(prefs.get(VIEWS_PREF, true));
+      const tagColors = readTagColors();
       return {
         properties: readProperties(),
         ...(object(saved) ? views(saved.views, saved.active) : views([], null)),
+        ...(tagColors !== undefined && { tagColors }),
       };
     },
     writeViews,
+    setTagColor,
+    writeTagColors,
     applySync(snapshot: {
       readonly schema: readonly Property[];
       readonly views: readonly View[];

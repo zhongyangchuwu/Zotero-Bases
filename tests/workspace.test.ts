@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { changeSchema } from '../src/config';
+import { changeSchema, createConfig } from '../src/config';
 import type {
   BulkChange,
   BulkResult,
@@ -24,6 +24,7 @@ import {
   type GlobalPreferences,
 } from '../src/global-preferences';
 import { mountWorkspace } from '../src/workspace';
+import { preferences } from './settings-fixture';
 
 const properties: readonly Property[] = [
   { key: 'Memo', type: 'text' },
@@ -81,6 +82,8 @@ afterEach(() => {
 function fixture(rows: readonly Row[] = [sample], view: View = defaultView) {
   let entries = rows;
   let settings: Preferences = { properties, views: [view], active: view.id };
+  const { prefs } = preferences();
+  const config = createConfig(prefs, () => view.scope, validate, { initializeDefault: false });
   const handlers = new Set<Parameters<WorkspaceHost['subscribe']>[0]>();
   const notify = (kind: 'settings' | 'data'): void => {
     for (const handler of handlers) handler(kind);
@@ -102,6 +105,12 @@ function fixture(rows: readonly Row[] = [sample], view: View = defaultView) {
     change: vi.fn(async (change: ConfigChange): Promise<MutationResult> => {
       if (change.kind === 'views') {
         settings = { ...settings, views: change.views, active: change.active };
+        notify('settings');
+        return { changed: 0, skipped: 0 };
+      }
+      if (change.kind === 'set-tag-color') {
+        config.setTagColor(change);
+        settings = { ...settings, tagColors: config.settings().tagColors };
         notify('settings');
         return { changed: 0, skipped: 0 };
       }
@@ -173,7 +182,7 @@ function fixture(rows: readonly Row[] = [sample], view: View = defaultView) {
       return summary;
     }),
     suggestPropertyKey: vi.fn(suggestPropertyKey),
-    openItem: vi.fn(async (_id: number, _pdf: boolean): Promise<void> => {}),
+    openItem: vi.fn(async (_id: number, _target: boolean | 'attachment'): Promise<void> => {}),
     subscribe: vi.fn((listener: Parameters<WorkspaceHost['subscribe']>[0]) => {
       handlers.add(listener);
       return () => handlers.delete(listener);
@@ -536,7 +545,7 @@ describe('Zotero Bases workspace', () => {
     expect(pill().textContent).toBe('Reading');
     const previous = pill().dataset.tone;
     const color = previous === 'rose' ? 'green' : 'rose';
-    const label = color === 'rose' ? 'Rose' : 'Green';
+    const label = color === 'rose' ? 'Magenta' : 'Green';
     click(root, `${label} · Status: Reading`);
     await settle();
     expect(pill().dataset.tone).toBe(color);
@@ -548,6 +557,82 @@ describe('Zotero Bases workspace', () => {
     expect(pill().dataset.tone).toBe(previous);
     expect(focusedKey('Escape')).toBe(false);
     expect(document.activeElement).toBe(header(root, 'property:Status'));
+  });
+
+  it('recolors a multi-select option from its inline editor without changing the selected value', async () => {
+    const { host } = fixture([
+      { ...sample, extra: 'Method: Survey' },
+      { ...sample, id: 2, extra: 'Method: Survey' },
+    ]);
+    const { root } = attach(host);
+    const { root: other } = attach(host);
+    await settle();
+    get(cell(root, 'property:Method'), 'button').click();
+    click(root, 'Option color · Method: Survey');
+    const swatch = get<HTMLButtonElement>(root, 'button[aria-label="Red · Method: Survey"]');
+    swatch.focus();
+    swatch.click();
+    await settle();
+    expect(document.activeElement).toBe(swatch);
+    expect(swatch.getAttribute('aria-pressed')).toBe('true');
+    for (const [surface, id] of [
+      [root, 1],
+      [root, 2],
+      [other, 1],
+    ] as const) {
+      const pill = get(cell(surface, 'property:Method', id), '.zb-cell-pill');
+      expect(pill.textContent).toBe('Survey');
+      expect(pill.dataset.tone).toBe('red');
+    }
+    expect(host.setProperty).not.toHaveBeenCalled();
+  });
+
+  it('repaints all workspaces with native, exact, then longest-prefix tag color precedence', async () => {
+    const tags = [
+      'topic/native',
+      'topic/long/exact',
+      'topic/long/child',
+      'topic/other',
+      'uncolored',
+    ];
+    const row = { ...sample, tags, nativeTagColors: new Map([['topic/native', '#da4453']]) };
+    const { host } = fixture([row], { ...defaultView, columns: ['tags'] });
+    const { root } = attach(host);
+    const { root: other } = attach(host);
+    await settle();
+    header(root, 'tags').click();
+    click(root, 'Tag colors');
+    const name = get<HTMLInputElement>(root, 'input[aria-label="Tag or prefix"]');
+    changeSelection(root, 'Match by', 'prefix');
+    type(name, 'topic/');
+    click(root, 'Blue');
+    type(name, 'topic/long/');
+    click(root, 'Violet');
+    changeSelection(root, 'Match by', 'tag');
+    type(name, 'topic/long/exact');
+    click(root, 'Orange');
+    await settle();
+    for (const surface of [root, other]) {
+      const pills = Array.from(
+        cell(surface, 'tags').querySelectorAll<HTMLElement>(
+          '.zb-cell-pill:not(.zb-cell-pill-more)',
+        ),
+      );
+      expect(pills[0]?.style.getPropertyValue('--zb-native-tag-color')).toBe('#da4453');
+      expect(pills.map((pill) => pill.dataset.tone)).toEqual([
+        undefined,
+        'orange',
+        'violet',
+        'sky',
+        undefined,
+      ]);
+    }
+    click(root, 'Use inherited color');
+    await settle();
+    expect(cell(root, 'tags').querySelectorAll<HTMLElement>('.zb-cell-pill')[1]?.dataset.tone).toBe(
+      'violet',
+    );
+    expect(host.changeTag).not.toHaveBeenCalled();
   });
 
   it('promotes, appends, reverses, reorders, removes and clears sorts without duplicating fields', async () => {

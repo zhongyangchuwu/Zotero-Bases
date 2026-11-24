@@ -25,6 +25,7 @@ const labels = {
   locate: 'Locate item',
   open: 'Open',
   openPDF: 'Open PDF',
+  openAttachment: 'Open attachment',
   openLink: 'Open link',
   copyDOI: 'Copy DOI',
   readOnly: 'Read-only',
@@ -32,7 +33,7 @@ const labels = {
   untitled: 'Untitled',
 };
 
-function fixture(doc = document, enableLinks = true) {
+function fixture(doc = document, enableLinks = true, tagColor?: CellActions['tagColor']) {
   const open = vi.fn<CellActions['open']>();
   const edit = vi.fn<CellActions['edit']>();
   const toggle = vi.fn<CellActions['toggle']>();
@@ -41,6 +42,7 @@ function fixture(doc = document, enableLinks = true) {
   const renderers = createCellRenderers(doc, {
     open,
     linkActions: enableLinks ? { open: openLink, copy: copyDOI } : undefined,
+    tagColor,
     edit,
     toggle,
     columnName: (column) => column.replace('property:', ''),
@@ -53,6 +55,13 @@ function get<T extends HTMLElement>(root: ParentNode, selector: string): T {
   const node = root.querySelector<T>(selector);
   if (!node) throw new Error(`Missing ${selector}`);
   return node;
+}
+
+function expectIcon(icon: HTMLElement | SVGElement, light: string, dark?: string): void {
+  const url = (path: string) => `url("chrome://zotero/skin/${path}.svg")`;
+  expect(icon.getAttribute('aria-hidden')).toBe('true');
+  expect(icon.style.getPropertyValue('--zb-icon-light')).toBe(url(light));
+  expect(icon.style.getPropertyValue('--zb-icon-dark')).toBe(dark ? url(dark) : '');
 }
 
 afterEach(() => {
@@ -229,6 +238,11 @@ describe('cell renderers', () => {
     expect(attachment.dataset.focus).toBe('cell:42:pdf');
     expect(attachment.getAttribute('aria-label')).toBe('Open PDF · A Paper');
     expect(attachment.textContent).toBe('');
+    expectIcon(
+      get(attachment, '.zb-native-icon'),
+      'item-type/12/light/attachment-pdf',
+      'item-type/12/dark/attachment-pdf',
+    );
     expect(locate.dataset.focus).toBe('cell:42:title');
     expect(locate.title).toContain(row.title);
     expect(locate.title).toContain('Locate item');
@@ -243,6 +257,26 @@ describe('cell renderers', () => {
     const missing = render({ ...row, pdf: false }, 'pdf', undefined, false);
     expect(missing.childNodes).toHaveLength(0);
   });
+
+  it.each(['pdf', 'epub', 'snapshot', 'file'] as const)(
+    'opens the preferred %s through the attachment target and renders both native theme assets',
+    (attachment) => {
+      const { render, open } = fixture();
+      const item = { ...row, attachment, pdf: attachment === 'pdf' };
+      const cell = render(item, 'pdf', undefined, item.pdf);
+      const button = get<HTMLButtonElement>(cell, '.zb-attachment-button');
+      expect(button.dataset.attachment).toBe(attachment);
+      const label = attachment === 'pdf' ? labels.openPDF : labels.openAttachment;
+      expect(button.getAttribute('aria-label')).toBe(`${label} · ${row.title}`);
+      expectIcon(
+        get(button, '.zb-native-icon'),
+        `item-type/12/light/attachment-${attachment}`,
+        `item-type/12/dark/attachment-${attachment}`,
+      );
+      button.click();
+      expect(open.mock.calls).toEqual([[item, 'attachment']]);
+    },
+  );
 
   it('keeps blank editable cells visually empty and accessible', () => {
     const { render, edit } = fixture();
@@ -306,18 +340,23 @@ describe('cell renderers', () => {
     expect(custom.querySelector('path')?.getAttribute('d')).not.toBe(
       native.querySelector('path')?.getAttribute('d'),
     );
-    const icon = (column: Parameters<typeof createFieldIcon>[1]) =>
-      createFieldIcon(doc, column).querySelector('path')?.getAttribute('d');
-    expect(icon('dateModified')).toBe(icon('accessDate'));
-    expect(icon('doi')).toBe(icon('url'));
-    const distinct = [
-      'citationKey',
-      'collections',
-      'doi',
-      'notesCount',
-      'attachmentsCount',
-    ] as const;
-    expect(new Set(distinct.map(icon)).size).toBe(distinct.length);
+    const icon = (column: Parameters<typeof createFieldIcon>[1]) => createFieldIcon(doc, column);
+    expect(icon('dateModified').querySelector('path')?.getAttribute('d')).toBe(
+      icon('accessDate').querySelector('path')?.getAttribute('d'),
+    );
+    expect(icon('citationKey').querySelector('path')?.getAttribute('d')).not.toBe(
+      icon('collections').querySelector('path')?.getAttribute('d'),
+    );
+    const pdf = icon('pdf');
+    expect(pdf.ownerDocument).toBe(doc);
+    expect(pdf.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
+    expect(pdf.classList.contains('zb-field-icon')).toBe(true);
+    expectIcon(pdf, 'item-type/12/light/attachment-pdf', 'item-type/12/dark/attachment-pdf');
+    expectIcon(icon('notesCount'), '16/universal/note');
+    expectIcon(icon('attachmentsCount'), '16/universal/attachment');
+    expectIcon(icon('tags'), '16/universal/tag');
+    expectIcon(icon('doi'), '16/universal/link');
+    expectIcon(icon('url'), '16/universal/link');
   });
 
   it('marks numeric cells, badges item types, and passes the original edit value', () => {
@@ -337,6 +376,28 @@ describe('cell renderers', () => {
     opener.click();
     expect(edit).toHaveBeenCalledWith(row, 'property:Score', score, '0.25', number, opener);
   });
+
+  it.each([
+    ['journalArticle', '期刊文章', 'journal-article'],
+    ['bookSection', '图书章节', 'book-section'],
+    ['tvBroadcast', '电视广播', 'tv-broadcast'],
+    ['constructor', 'Custom type', 'document'],
+  ])(
+    'maps stable item type %s without interpreting its translated label',
+    (itemType, type, asset) => {
+      const { render } = fixture();
+      const cell = render({ ...row, itemType, type }, 'type', undefined, type);
+      const badge = get(cell, '.zb-type-badge');
+      expect(badge.dataset.itemType).toBe(itemType);
+      expect(get(badge, '.zb-type-label').textContent).toBe(type);
+      expect(cell.title).toBe(type);
+      expectIcon(
+        get(badge, '.zb-native-icon'),
+        `item-type/16/light/${asset}`,
+        `item-type/16/dark/${asset}`,
+      );
+    },
+  );
 
   it('shows consistent reading-state colors in single and multi-select cells', () => {
     const { render } = fixture();
@@ -366,6 +427,59 @@ describe('cell renderers', () => {
     expect(
       get(render(row, 'tags', undefined, ['Done']), '.zb-cell-pill').dataset.tone,
     ).toBeUndefined();
+  });
+
+  it('paints only trusted tag hex or palette tones and resets existing pills in place', () => {
+    const color = '--zb-native-tag-color';
+    const tagColor = vi.fn<NonNullable<CellActions['tagColor']>>((_, name) => {
+      if (name === 'Topic A') return { native: '#F1a2b3', tone: 'orange' };
+      if (name === 'Topic B') return { tone: 'teal' };
+      if (name === 'Long Topic C') return { native: '#ffcc99; color: red', tone: 'rose' };
+      return undefined;
+    });
+    const { render, paintColors } = fixture(document, true, tagColor);
+    const cell = render(row, 'tags', undefined, [...row.tags, 'Neutral']);
+    const [native, palette, invalid, neutral, more] =
+      cell.querySelectorAll<HTMLElement>('.zb-cell-pill');
+    expect(tagColor).toHaveBeenCalledWith(row, 'Topic A');
+    expect(native!.style.getPropertyValue(color)).toBe('#F1a2b3');
+    expect(native!.dataset.tone).toBeUndefined();
+    expect(palette!.dataset.tone).toBe('teal');
+    expect(invalid!.style.getPropertyValue(color)).toBe('');
+    expect(invalid!.dataset.tone).toBe('rose');
+    expect(neutral!.style.getPropertyValue(color)).toBe('');
+    expect(neutral!.dataset.tone).toBeUndefined();
+
+    more!.textContent = '+1';
+    tagColor
+      .mockClear()
+      .mockImplementation((_, name) => (name === 'Topic A' ? { tone: 'green' } : undefined));
+    paintColors(row, 'tags', undefined, cell);
+    expect(tagColor).not.toHaveBeenCalledWith(row, '+1');
+    expect(native!.style.getPropertyValue(color)).toBe('');
+    expect(native!.dataset.tone).toBe('green');
+    expect(palette!.dataset.tone).toBeUndefined();
+    expect(palette!.textContent).toBe('Topic B');
+
+    tagColor.mockImplementation((_, name) =>
+      name === 'Topic A' ? { native: '#123456' } : undefined,
+    );
+    paintColors(row, 'tags', undefined, cell);
+    expect(native!.style.getPropertyValue(color)).toBe('#123456');
+    expect(native!.dataset.tone).toBeUndefined();
+  });
+
+  it('repaints existing option pills with an override and restores the auto tone when reset', () => {
+    const { render, paintColors } = fixture();
+    const column = 'property:Status';
+    const property: Property = { key: 'Status', type: 'single-select' };
+    const cell = render(row, column, property, 'Done');
+    const pill = get(cell, '.zb-cell-pill');
+    expect(pill.dataset.tone).toBe('green');
+    paintColors(row, column, { ...property, optionColors: { Done: 'sky' } }, cell);
+    expect(pill.dataset.tone).toBe('sky');
+    paintColors(row, column, property, cell);
+    expect(pill.dataset.tone).toBe('green');
   });
 
   it('uses own manual option colors and falls back for missing or inherited entries', () => {
