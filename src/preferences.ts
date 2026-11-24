@@ -59,6 +59,15 @@ const css = `
 .zb-preferences .zb-preference-field,
 .zb-preferences .zb-sync-location > label { display: grid; gap: 0.25rem; margin-block: 0.55rem; }
 .zb-preferences .zb-preference-field > menulist { justify-self: start; max-width: 100%; }
+@media (-moz-platform: windows) {
+  /* Zotero reserves a radio-marker gutter even for options without icons. */
+  .zb-preferences .zb-preference-field > menulist > menupopup > menuitem {
+    padding-inline-start: 12px !important;
+  }
+  .zb-preferences .zb-preference-field > menulist > menupopup > menuitem > .menu-icon {
+    display: none;
+  }
+}
 .zb-preferences .zb-preference-toggle { display: flex; align-items: center; gap: 0.35rem; margin-block: 0.55rem; }
 .zb-preferences textarea { box-sizing: border-box; width: 100%; min-height: 6em; resize: vertical; font-family: monospace; }
 .zb-preferences .zb-preference-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
