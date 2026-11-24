@@ -35,11 +35,11 @@
 - **Terminal**：直角、细分隔线与等宽元信息；浅色底为 `#f8fafc`。
 - **Modern**：柔和圆角与留白。
 
-三套外观都跟随 Zotero 明暗模式。界面语言可跟随 Zotero，或固定为简体中文 / English；表格键盘流和底部快捷键提示可在全局设置中关闭。
+三套外观都跟随 Zotero 的明暗模式、界面字体和字号。用 Zotero 的 **视图 → 字体大小** 调整字号，Bases 标签页和独立窗口的表格会随之调整行高，无需重开。界面语言可跟随 Zotero，或固定为简体中文 / English；表格键盘流和底部快捷键提示可在全局设置中关闭。
 
 ### 自定义 CSS
 
-CSS 只作用于 `.zb-workspace` 和其中的元素，不影响 Zotero 原生界面或 PDF。常用变量：`--zb-bg` 背景、`--zb-surface` 控件表面、`--zb-text` 正文、`--zb-muted` 次要文字、`--zb-border` 边框、`--zb-accent` 强调色、`--zb-link` DOI 与网址链接色、`--zb-selected` 选区、`--zb-danger` 错误、`--zb-row-height` 行高。常用类：`.zb-top`、`.zb-toolbar`、`.zb-table-wrap`、`.zb-cell-pill`、`.zb-editor`、`.zb-table-status`。
+CSS 只作用于 `.zb-workspace` 和其中的元素，不影响 Zotero 原生界面或 PDF。可用 `--zb-font-family` 和 `--zb-font-size` 覆盖跟随 Zotero 的字体和字号。其他常用变量：`--zb-bg` 背景、`--zb-surface` 控件表面、`--zb-text` 正文、`--zb-muted` 次要文字、`--zb-border` 边框、`--zb-accent` 强调色、`--zb-link` DOI 与网址链接色、`--zb-selected` 选区、`--zb-danger` 错误、`--zb-row-height` 行高。常用类：`.zb-top`、`.zb-toolbar`、`.zb-table-wrap`、`.zb-cell-pill`、`.zb-editor`、`.zb-table-status`。
 
 ```css
 .zb-workspace {

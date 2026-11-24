@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import { createConfigurationBackup } from '../src/backup';
+import type { WorkspaceHost } from '../src/contracts';
 import { validateProperty } from '../src/extra';
 import { createGlobalPreferenceStore } from '../src/global-preferences';
 import { mountPreferences } from '../src/preferences';
 import type { SyncPort } from '../src/sync';
+import { mountWorkspace } from '../src/workspace';
+import { commandMenuItem, installXULMenulist } from './preference-menulist-fixture';
 import { preferences } from './settings-fixture';
 
 function fixture(hostLocale = 'en-US') {
+  const removeXUL = installXULMenulist(document);
   const { prefs, listeners } = preferences();
   const store = createGlobalPreferenceStore(prefs);
   const backup = createConfigurationBackup(prefs, validateProperty);
@@ -25,13 +29,74 @@ function fixture(hostLocale = 'en-US') {
   };
   const root = document.createElement('div');
   document.body.append(root);
-  const unmount = mountPreferences(root, { store, backup, sync, hostLocale: () => hostLocale });
-  return { root, store, backup, stopSync, listeners, unmount };
+  const dispose = mountPreferences(root, { store, backup, sync, hostLocale: () => hostLocale });
+  return {
+    root,
+    prefs,
+    store,
+    backup,
+    stopSync,
+    listeners,
+    unmount() {
+      dispose();
+      removeXUL();
+    },
+  };
 }
 
-function change(control: HTMLInputElement | HTMLSelectElement, value: string): void {
-  control.value = value;
-  control.dispatchEvent(new Event('change', { bubbles: true }));
+function workspaceHost(creators: string): WorkspaceHost {
+  const unexpected = (): never => {
+    throw new Error('Unexpected workspace host action');
+  };
+  return {
+    settings: () => ({
+      properties: [],
+      views: [
+        {
+          id: 'default',
+          name: 'Library',
+          scope: 'personal',
+          columns: ['title', 'creators'],
+          sorts: [],
+          filters: [],
+        },
+      ],
+      active: 'default',
+    }),
+    scopes: () => [{ id: 'personal', label: 'My Library' }],
+    initialScope: () => 'personal',
+    load: async () => ({
+      rows: [
+        {
+          id: 1,
+          writable: false,
+          title: 'A paper',
+          creators,
+          year: '2024',
+          source: '',
+          type: 'journalArticle',
+          tags: [],
+          pdf: false,
+          added: '2024-10-31',
+          extra: '',
+        },
+      ],
+      tags: new Set(),
+    }),
+    change: unexpected,
+    setProperty: unexpected,
+    changeTag: unexpected,
+    bulk: unexpected,
+    suggestPropertyKey: unexpected,
+    openItem: unexpected,
+    subscribe: () => () => {},
+  };
+}
+
+function dropdown(root: HTMLElement, key: string): Element {
+  const menu = root.querySelector(`menulist[name="${key}"]`);
+  if (!menu) throw new Error(`Missing preference dropdown ${key}`);
+  return menu;
 }
 
 function attachFile(input: HTMLInputElement, text: string): void {
@@ -53,14 +118,25 @@ describe('preferences pane', () => {
         'Sync and configuration backup',
         'Language and keyboard flow',
       ]);
-      const appearance = root.querySelector<HTMLSelectElement>('select[name="appearance"]')!;
-      change(appearance, 'terminal');
-      root.querySelector<HTMLInputElement>('input[name="keyboardFlow"]')!.click();
-      expect(store.read()).toMatchObject({ appearance: 'terminal', keyboardFlow: false });
-      store.set('openMode', 'window');
-      expect(root.querySelector<HTMLSelectElement>('select[name="openMode"]')?.value).toBe(
-        'window',
+      expect(root.querySelectorAll('select')).toHaveLength(0);
+      const appearance = dropdown(root, 'appearance');
+      expect(root.querySelector(`label[control="${appearance.id}"]`)?.textContent).toBe(
+        'Appearance preset',
       );
+      commandMenuItem(appearance, 'terminal');
+      commandMenuItem(dropdown(root, 'openMode'), 'window');
+      commandMenuItem(dropdown(root, 'defaultDensity'), 'wrap');
+      commandMenuItem(dropdown(root, 'authorFormat'), 'singleLine');
+      root.querySelector<HTMLInputElement>('input[name="keyboardFlow"]')!.click();
+      expect(store.read()).toMatchObject({
+        appearance: 'terminal',
+        openMode: 'window',
+        defaultDensity: 'wrap',
+        authorFormat: 'singleLine',
+        keyboardFlow: false,
+      });
+      store.set('openMode', 'tab');
+      expect(dropdown(root, 'openMode').getAttribute('value')).toBe('tab');
 
       editor.focus();
       editor.value = ':scope { --zb-accent: red; }';
@@ -69,11 +145,16 @@ describe('preferences pane', () => {
       expect(store.read().customCSS).toBe(editor.value);
       expect(document.activeElement).toBe(editor);
       expect(editor.selectionStart).toBe(8);
-      change(root.querySelector<HTMLSelectElement>('select[name="language"]')!, 'zh-CN');
+      const language = dropdown(root, 'language');
+      commandMenuItem(language, 'zh-CN');
+      expect(store.read().language).toBe('zh-CN');
+      expect(dropdown(root, 'language')).toBe(language);
+      expect(appearance.querySelector('menuitem[selected]')?.getAttribute('label')).toBe('终端');
       expect(root.querySelector('.zb-preferences')?.getAttribute('lang')).toBe('zh-CN');
       expect(root.textContent).toContain('开启文库同步');
       expect(root.textContent).toContain('自定义 CSS');
       expect(root.querySelector('textarea')).toBe(editor);
+      expect(document.activeElement).toBe(editor);
       expect(editor.selectionStart).toBe(8);
     } finally {
       unmount();
@@ -82,6 +163,53 @@ describe('preferences pane', () => {
     expect(stopSync).toHaveBeenCalledOnce();
     expect(listeners.size).toBe(0);
     expect(root.childElementCount).toBe(0);
+  });
+
+  it('persists pane choices and updates two already-mounted workspaces through the real store', async () => {
+    const { root, prefs, unmount } = fixture();
+    const creators = 'Ada Lovelace; Grace Hopper; Mary Jackson';
+    const tab = document.body.appendChild(document.createElement('main'));
+    const window = document.body.appendChild(document.createElement('main'));
+    const closeTab = mountWorkspace(tab, workspaceHost(creators), {
+      language: 'en',
+      global: createGlobalPreferenceStore(prefs),
+      popOut: () => {},
+    });
+    const closeWindow = mountWorkspace(window, workspaceHost(creators), {
+      language: 'en',
+      global: createGlobalPreferenceStore(prefs),
+    });
+    const surfaces = [tab, window];
+    const author = (surface: HTMLElement) =>
+      surface.querySelector('tr[data-item-id="1"] td[data-column="creators"]');
+    try {
+      await vi.waitFor(() => {
+        for (const surface of surfaces) {
+          expect(author(surface)?.textContent).toBe('Ada Lovelace et al.');
+        }
+      });
+
+      commandMenuItem(dropdown(root, 'authorFormat'), 'singleLine');
+      for (const surface of surfaces) expect(author(surface)?.textContent).toBe(creators);
+      commandMenuItem(dropdown(root, 'language'), 'zh-CN');
+      expect(createGlobalPreferenceStore(prefs).read()).toMatchObject({
+        authorFormat: 'singleLine',
+        language: 'zh-CN',
+      });
+      for (const surface of surfaces) {
+        expect(author(surface)?.textContent).toBe(creators);
+        expect(surface.querySelector('[role="searchbox"]')?.getAttribute('aria-label')).toBe(
+          '在当前范围内搜索',
+        );
+      }
+    } finally {
+      closeWindow();
+      closeTab();
+      window.remove();
+      tab.remove();
+      unmount();
+      root.remove();
+    }
   });
 
   it('reads configuration files and shows a localized summary or a nonblocking error', async () => {

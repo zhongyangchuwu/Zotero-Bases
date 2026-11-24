@@ -264,6 +264,14 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
     'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;contain:paint style;';
   parent.append(root);
   const media = session.owner.matchMedia('(prefers-color-scheme: dark)');
+  const nativePane = session.owner.document.getElementById('zotero-pane');
+  const updateTypography = () => {
+    if (!nativePane) return;
+    // Resolve rem in Zotero's main window, not in window.xhtml.
+    const { fontFamily, fontSize } = session.owner.getComputedStyle(nativePane);
+    root.style.setProperty('--zb-native-font-family', fontFamily);
+    root.style.setProperty('--zb-native-font-size', fontSize);
+  };
   const update = () => {
     const native = session.owner.getComputedStyle(session.owner.document.documentElement);
     for (const [name, token] of NATIVE_COLORS) {
@@ -273,6 +281,7 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   };
   try {
     update();
+    updateTypography();
     const unmount = mountWorkspace(root, session.host, {
       language: language(),
       popOut,
@@ -291,10 +300,12 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
       },
     });
     media.addEventListener('change', update);
+    nativePane?.addEventListener('UIPropertiesChanged', updateTypography);
     return {
       root,
       dispose: () => {
         media.removeEventListener('change', update);
+        nativePane?.removeEventListener('UIPropertiesChanged', updateTypography);
         unmount();
         root.remove();
       },

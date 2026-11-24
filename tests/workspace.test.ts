@@ -1054,6 +1054,48 @@ describe('Zotero Bases workspace', () => {
     expect(rowIds(root)[0]).toBe(113);
   });
 
+  it('keeps the same row in view when the native font grows at a scrolled position', async () => {
+    const rows = Array.from({ length: 320 }, (_, index) => ({ ...sample, id: index + 1 }));
+    const { host } = fixture(rows, { ...defaultView, columns: ['title'], sorts: [] });
+    const refresh = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(
+          private readonly notify: (changes: Pick<ResizeObserverEntry, 'target'>[]) => void,
+        ) {}
+        observe(target: Element) {
+          refresh.set(target, () => this.notify([{ target }]));
+        }
+        disconnect() {
+          refresh.clear();
+        }
+      },
+    );
+    try {
+      const { root } = attach(host);
+      const probe = get(root, '.zb-row-probe');
+      let font = 13;
+      let rowHeight = 33.796875;
+      vi.spyOn(probe, 'getBoundingClientRect').mockImplementation(
+        () => new DOMRect(0, 0, font, rowHeight),
+      );
+      await settle();
+      const viewport = get(root, '.zb-table-wrap');
+      const index = 159;
+      await scrollGrid(viewport, index * rowHeight + 7);
+      expect(rowIds(root)).toContain(index + 1);
+
+      font = 14.04;
+      rowHeight = 36.5;
+      refresh.get(probe)!();
+      await vi.waitFor(() => expect(viewport.scrollTop).toBeCloseTo(index * rowHeight + 7));
+      expect(rowIds(root)).toContain(index + 1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('moves between cells and edits immediately without claiming the Space leader', async () => {
     const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }], {
       ...defaultView,

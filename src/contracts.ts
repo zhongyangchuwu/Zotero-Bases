@@ -64,7 +64,7 @@ export const NATIVE_COLUMN_DEFINITIONS = [
     defaultVisible: true,
     search: true,
   }),
-  nativeColumn('year', 'common', 'number', 'calendar', 90, ['Year', '年份'], {
+  nativeColumn('year', 'common', 'number', 'calendar', 126, ['Year', '年份'], {
     defaultVisible: true,
     search: true,
     grouping: 'value',
@@ -82,7 +82,7 @@ export const NATIVE_COLUMN_DEFINITIONS = [
     search: true,
     grouping: 'member',
   }),
-  nativeColumn('pdf', 'common', 'boolean', 'pdf', 56, ['PDF', 'PDF'], { defaultVisible: true }),
+  nativeColumn('pdf', 'common', 'boolean', 'pdf', 104, ['PDF', 'PDF'], { defaultVisible: true }),
   nativeColumn('added', 'common', 'date', 'calendar', 112, ['Date added', '添加时间'], {
     defaultVisible: true,
     grouping: 'month',
@@ -106,7 +106,7 @@ export const NATIVE_COLUMN_DEFINITIONS = [
   nativeColumn('lastRead', 'common', 'date', 'calendar', 118, ['Last Read', '最后阅读时间'], {
     grouping: 'month',
   }),
-  nativeColumn('notesCount', 'common', 'number', 'notes', 110, ['Notes', '笔记数'], {
+  nativeColumn('notesCount', 'common', 'number', 'notes', 152, ['Notes', '笔记数'], {
     grouping: 'value',
   }),
   nativeColumn(

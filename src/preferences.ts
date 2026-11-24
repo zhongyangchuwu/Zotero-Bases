@@ -5,6 +5,7 @@ import {
   type GlobalPreferenceStore,
 } from './global-preferences';
 import { messages } from './i18n';
+import { createPreferenceMenulist } from './preference-menulist';
 import type { SyncPort } from './sync';
 import { mountSyncControls } from './sync-controls';
 
@@ -56,8 +57,8 @@ const css = `
 .zb-preferences section:last-child { border: 0; }
 .zb-preferences h2 { margin-block: 0 0.55rem; }
 .zb-preferences .zb-preference-field,
-.zb-preferences .zb-sync-location label { display: grid; gap: 0.25rem; margin-block: 0.55rem; }
-.zb-preferences .zb-preference-field > select { justify-self: start; max-width: 100%; }
+.zb-preferences .zb-sync-location > label { display: grid; gap: 0.25rem; margin-block: 0.55rem; }
+.zb-preferences .zb-preference-field > menulist { justify-self: start; max-width: 100%; }
 .zb-preferences .zb-preference-toggle { display: flex; align-items: center; gap: 0.35rem; margin-block: 0.55rem; }
 .zb-preferences textarea { box-sizing: border-box; width: 100%; min-height: 6em; resize: vertical; font-family: monospace; }
 .zb-preferences .zb-preference-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
@@ -130,6 +131,7 @@ export function mountPreferences(
   const { store, hostLocale, sync, backup } = options;
   const doc = root.ownerDocument;
   const labels: [Text, Caption][] = [];
+  const itemLabels: [Element, Caption][] = [];
   const updateControls: ((value: GlobalPreferences) => void)[] = [];
   const initial = store.read();
   let language = resolveLanguage(initial.language, hostLocale());
@@ -139,7 +141,7 @@ export function mountPreferences(
     doc.createElementNS(HTML, tag) as HTMLElementTagNameMap[K];
   let t = messages(captions, language);
 
-  function label(element: HTMLElement, key: Caption): void {
+  function label(element: Element, key: Caption): void {
     const text = doc.createTextNode(t(key));
     element.append(text);
     labels.push([text, key]);
@@ -170,28 +172,27 @@ export function mountPreferences(
     parent.append(row);
   }
 
-  function select<K extends keyof GlobalPreferences>(
+  function dropdown<K extends keyof GlobalPreferences>(
     parent: HTMLElement,
     key: K,
     caption: Caption,
     choices: readonly (readonly [GlobalPreferences[K] & string, Caption])[],
   ): void {
-    const control = node('select');
-    control.name = key;
+    const menu = createPreferenceMenulist(doc, key);
     for (const [value, name] of choices) {
-      const option = node('option');
-      option.value = value;
-      label(option, name);
-      control.append(option);
+      const item = menu.appendItem(value, t(name));
+      itemLabels.push([item, name]);
+      item.addEventListener('command', () => store.set(key, value));
     }
-    control.addEventListener('change', () => {
-      const choice = choices[control.selectedIndex];
-      if (choice) store.set(key, choice[0]);
-    });
     updateControls.push((value) => {
-      if (control.value !== value[key]) control.value = String(value[key]);
+      const selected = String(value[key]);
+      if (menu.control.value !== selected) menu.control.value = selected;
     });
-    field(parent, caption, control);
+    const row = node('div');
+    row.className = 'zb-preference-field';
+    label(menu.label, caption);
+    row.append(menu.label, menu.control);
+    parent.append(row);
   }
 
   function toggle(
@@ -214,7 +215,7 @@ export function mountPreferences(
   }
 
   const appearance = panel('appearance', 'appearancePanel');
-  select(appearance, 'appearance', 'appearance', [
+  dropdown(appearance, 'appearance', 'appearance', [
     ['classic', 'classic'],
     ['terminal', 'terminal'],
     ['modern', 'modern'],
@@ -232,16 +233,16 @@ export function mountPreferences(
   toggle(appearance, 'showShortcuts', 'shortcuts');
 
   const defaults = panel('defaults', 'defaultsPanel');
-  select(defaults, 'openMode', 'openMode', [
+  dropdown(defaults, 'openMode', 'openMode', [
     ['tab', 'tab'],
     ['window', 'window'],
   ]);
-  select(defaults, 'defaultDensity', 'density', [
+  dropdown(defaults, 'defaultDensity', 'density', [
     ['compact', 'compact'],
     ['comfortable', 'comfortable'],
     ['wrap', 'wrap'],
   ]);
-  select(defaults, 'authorFormat', 'authorFormat', [
+  dropdown(defaults, 'authorFormat', 'authorFormat', [
     ['etAl', 'etAl'],
     ['singleLine', 'singleLine'],
   ]);
@@ -266,7 +267,7 @@ export function mountPreferences(
   syncPanel.append(backupActions, result);
 
   const languagePanel = panel('language', 'languagePanel');
-  select(languagePanel, 'language', 'language', [
+  dropdown(languagePanel, 'language', 'language', [
     ['auto', 'auto'],
     ['zh-CN', 'chinese'],
     ['en-US', 'english'],
@@ -328,6 +329,7 @@ export function mountPreferences(
     t = messages(captions, language);
     container.lang = language;
     for (const [text, key] of labels) text.data = t(key);
+    for (const [item, key] of itemLabels) item.setAttribute('label', t(key));
     syncControls.setLanguage(language);
     renderMessage();
   }
