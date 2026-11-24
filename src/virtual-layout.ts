@@ -32,12 +32,12 @@ export function flattenRows(
 
 const COMPACT_HEIGHT = 34;
 const COMFORTABLE_HEIGHT = 42;
-const WRAP_ESTIMATE = COMPACT_HEIGHT;
 
 export class VirtualLayout {
   private entries: readonly VirtualRow[] = [];
   private readonly indices = new Map<string, number>();
   private density: Density = 'compact';
+  private rowHeight = COMPACT_HEIGHT;
   private fixedHeight = COMPACT_HEIGHT;
   // Rows carry immutable content. Weak keys retain measurements while the catalog owns the
   // rows, including filtered and folded rows, without keeping replaced content alive.
@@ -58,8 +58,16 @@ export class VirtualLayout {
   setDensity(density: Density): void {
     if (density === this.density) return;
     this.density = density;
-    this.fixedHeight = density === 'comfortable' ? COMFORTABLE_HEIGHT : COMPACT_HEIGHT;
+    this.rowHeight = density === 'comfortable' ? COMFORTABLE_HEIGHT : COMPACT_HEIGHT;
+    this.fixedHeight = this.rowHeight;
     this.clearMeasurements();
+  }
+
+  setRowHeight(height: number): boolean {
+    if (!Number.isFinite(height) || height <= 0 || height === this.rowHeight) return false;
+    this.rowHeight = this.fixedHeight = height;
+    if (this.density === 'wrap') this.clearMeasurements();
+    return true;
   }
 
   setFixedHeight(height: number): boolean {
@@ -203,7 +211,7 @@ export class VirtualLayout {
         entry.kind === 'item'
           ? this.itemHeights.get(entry.row)
           : this.groupHeights.get(entry.group)?.[entry.folded ? 'folded' : 'open'];
-      sums[firstLeaf + index] = measured ?? WRAP_ESTIMATE;
+      sums[firstLeaf + index] = measured ?? this.rowHeight;
     }
     sums.fill(0, firstLeaf + entries.length);
     for (let node = firstLeaf - 1; node > 0; node--) {

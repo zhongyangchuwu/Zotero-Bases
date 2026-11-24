@@ -344,6 +344,8 @@ function mountWorkspaceSurface(
   let restoreGridFocus = false;
   let virtualFrame: number | undefined;
   let resetMeasurements = false;
+  let rowGeometryDirty = true;
+  let measuredEm = 0;
   let searchTerm = restored?.search.trim() ?? '';
   let searchTimer: number | undefined;
   let composingSearch = false;
@@ -666,8 +668,10 @@ function mountWorkspaceSurface(
   count.setAttribute('aria-live', 'polite');
   const keyHints = element('span', 'zb-table-keys', t('keyboardHint'));
   tableStatus.append(count, keyHints);
+  const rowProbe = element('span', 'zb-row-probe');
+  rowProbe.setAttribute('aria-hidden', 'true');
   panel.append(toolbar, warning, bulkBar, status, tableWrap, tableStatus);
-  surface.append(top, panel, tagValues);
+  surface.append(top, panel, tagValues, rowProbe);
   root.append(style, customStyle, surface);
   updateAppearance();
   syncSearchMode();
@@ -693,8 +697,14 @@ function mountWorkspaceSurface(
     }
   });
   tableWrap.addEventListener('click', gridClick, true);
-  const resizeObserver = window?.ResizeObserver && new window.ResizeObserver(scheduleWindow);
+  const resizeObserver =
+    window?.ResizeObserver &&
+    new window.ResizeObserver((changes) => {
+      if (changes.some(({ target }) => target === rowProbe)) rowGeometryDirty = true;
+      scheduleWindow();
+    });
   resizeObserver?.observe(tableWrap);
+  resizeObserver?.observe(rowProbe);
   surface.addEventListener('pointerdown', dismissSearchOutside);
   if (narrowWindow) surface.addEventListener('focusin', dismissSearchOutside);
 
@@ -880,7 +890,10 @@ function mountWorkspaceSurface(
     const distance = index < 0 ? 0 : tableWrap.scrollTop - layout.offset(index);
     const current = activeView().density ?? 'compact';
     density.value = current;
-    surface.dataset.density = current;
+    if (surface.dataset.density !== current) {
+      surface.dataset.density = current;
+      rowGeometryDirty = true;
+    }
     fitPills();
     layout.setDensity(current);
     if (tableBody) renderWindow(index < 0 ? 0 : layout.offset(index) + distance);
@@ -2594,9 +2607,22 @@ function mountWorkspaceSurface(
     const anchor = layout.indexAt(initial);
     const within = anchor < 0 ? 0 : initial - layout.offset(anchor);
     const atEnd = initial > 0 && initial + height >= layout.totalHeight - 2;
-    const baseChanged = resetMeasurements;
+    let heightChanged = false;
+    let invalidate = resetMeasurements;
+    if (rowGeometryDirty) {
+      rowGeometryDirty = false;
+      // Match the rendered CSS, including relative units and custom CSS overrides.
+      const probe = rowProbe.getBoundingClientRect();
+      heightChanged = layout.setRowHeight(probe.height);
+      if (probe.width > 0 && probe.width !== measuredEm) {
+        measuredEm = probe.width;
+        if (activeView().density === 'wrap') invalidate = true;
+        fitPills();
+      }
+    }
+    const baseChanged = heightChanged || invalidate;
     resetMeasurements = false;
-    if (baseChanged) layout.clearMeasurements();
+    if (invalidate && !heightChanged) layout.clearMeasurements();
     const topForAnchor = () => {
       const max = Math.max(0, layout.totalHeight - height);
       if (atEnd) return max;

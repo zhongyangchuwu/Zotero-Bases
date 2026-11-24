@@ -2,8 +2,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SyncPort, SyncStatus } from '../src/sync';
 import { mountSyncBadge, mountSyncControls } from '../src/sync-controls';
+import { commandMenuItem, installXULMenulist } from './preference-menulist-fixture';
 
 function fixture() {
+  const removeXUL = installXULMenulist(document);
   const parent = document.createElement('div');
   document.body.append(parent);
   let state: SyncStatus = {
@@ -39,6 +41,7 @@ function fixture() {
   const clean = () => {
     panel.dispose();
     parent.remove();
+    removeXUL();
   };
   return { parent, sync, update, button, clean, panel, observers };
 }
@@ -80,24 +83,34 @@ describe('library sync surface', () => {
   });
 
   it('opens location controls with the native choices and submits a rename without changing sync choice', async () => {
-    const { parent, sync, button, clean, panel } = fixture();
+    const { parent, sync, button, clean, panel, update } = fixture();
     try {
       await click(button('开启文库同步'));
+      update({ location: { ...sync.status().location, collection: 'DELETED' } });
       const location = parent.querySelector<HTMLDetailsElement>('details')!;
       expect(location.open).toBe(false);
       location.open = true;
       location.dispatchEvent(new Event('toggle'));
       const title = location.querySelector('input')!;
-      const collection = location.querySelector('select')!;
+      const collection = location.querySelector('menulist')!;
+      const captions = () =>
+        Array.from(collection.querySelectorAll('menuitem'), (item) => item.getAttribute('label'));
       expect(title.value).toBe('[Zotero Bases] Sync — Do Not Delete');
-      expect([...collection.options].map((option) => option.text)).toEqual(['我的文库', 'Reading']);
+      expect(captions()).toEqual(['我的文库', 'Reading']);
+      expect(collection.getAttribute('value')).toBe('');
       title.value = 'Literature configuration';
-      collection.value = 'COLLKEY1';
+      commandMenuItem(collection, 'COLLKEY1');
+      expect(sync.rename).not.toHaveBeenCalled();
+      update({ busy: true });
+      expect(collection.hasAttribute('disabled')).toBe(true);
+      update({ busy: false });
+      expect(collection.hasAttribute('disabled')).toBe(false);
       panel.setLanguage('en');
-      expect([...collection.options].map((option) => option.text)).toEqual([
-        'My Library',
-        'Reading',
-      ]);
+      expect(captions()).toEqual(['My Library', 'Reading']);
+      expect(location.querySelector(`label[control="${collection.id}"]`)?.textContent).toBe(
+        'Collection',
+      );
+      expect(location.querySelector('menulist')).toBe(collection);
       await click(button('Save location and name'));
       expect(sync.rename).toHaveBeenCalledExactlyOnceWith({
         title: 'Literature configuration',

@@ -135,6 +135,27 @@ describe('VirtualLayout', () => {
     expect(layout.window(70.5, 46.25)).toEqual({ start: 1, end: 3, top: 70.5, bottom: 68 });
   });
 
+  it('re-estimates unmounted wrap rows after a font resize without retaining old measurements', () => {
+    const layout = new VirtualLayout();
+    layout.setDensity('wrap');
+    layout.replace(items(...Array.from({ length: 320 }, (_, index) => index + 1)));
+    layout.measure(12, 68);
+    layout.measure(250, 102);
+    expect(layout.offset(160)).toBe(160 * 34 + 34);
+
+    layout.setRowHeight(36.5);
+    expect(layout.offset(160)).toBe(160 * 36.5);
+    expect(layout.indexAt(layout.offset(160))).toBe(160);
+    layout.measure(160, 63.5);
+    expect(layout.window(layout.offset(160), 63.5)).toEqual({
+      start: 160,
+      end: 161,
+      top: 160 * 36.5,
+      bottom: 159 * 36.5,
+    });
+    expect(layout.indexAt(layout.totalHeight - 1)).toBe(319);
+  });
+
   it('keeps fractional boundaries aligned and drops removed heights on replacement', () => {
     const layout = new VirtualLayout();
     const entries = items(1, 2, 3, 4, 5, 6, 7);

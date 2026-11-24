@@ -11,7 +11,7 @@ export const popoverCSS = String.raw`
   min-height: 0;
   max-height: var(--zb-popover-max-height, none);
   margin: 0;
-  padding: 0.5rem;
+  padding: 0.5em;
   overflow: auto;
   overscroll-behavior: contain;
   color: inherit;

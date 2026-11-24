@@ -1,4 +1,5 @@
 import { messages, type Language } from './i18n';
+import { createPreferenceMenulist } from './preference-menulist';
 import type { SyncPort, SyncStatus } from './sync';
 
 const HTML = 'http://www.w3.org/1999/xhtml';
@@ -41,13 +42,10 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
   const doc = parent.ownerDocument;
   const labels: [Text, Caption][] = [];
   let t = messages(captions, language);
-  const node = <K extends keyof HTMLElementTagNameMap>(tag: K, value?: string) => {
-    const element = doc.createElementNS(HTML, tag) as HTMLElementTagNameMap[K];
-    if (value) element.textContent = value;
-    return element;
-  };
+  const node = <K extends keyof HTMLElementTagNameMap>(tag: K) =>
+    doc.createElementNS(HTML, tag) as HTMLElementTagNameMap[K];
 
-  function label(element: HTMLElement, key: Caption): void {
+  function label(element: Element, key: Caption): void {
     const text = doc.createTextNode(t(key));
     element.append(text);
     labels.push([text, key]);
@@ -68,23 +66,22 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
   form.className = 'zb-sync-location';
   const title = node('input');
   title.required = true;
-  const collection = node('select');
+  const collection = createPreferenceMenulist(doc, 'collection');
   const save = node('button');
   label(save, 'save');
   save.type = 'submit';
   const titleLabel = node('label');
-  const collectionLabel = node('label');
+  const collectionField = node('div');
+  collectionField.className = 'zb-preference-field';
   label(titleLabel, 'title');
-  label(collectionLabel, 'collection');
+  label(collection.label, 'collection');
   titleLabel.append(title);
-  collectionLabel.append(collection);
-  form.append(titleLabel, collectionLabel, save);
+  collectionField.append(collection.label, collection.control);
+  form.append(titleLabel, collectionField, save);
   location.append(locationSummary, form);
   let disposed = false;
   let failed = false;
-  const library = node('option');
-  library.value = '';
-  label(library, 'root');
+  const library = collection.appendItem('', t('root'));
 
   async function run(action: () => Promise<void>): Promise<void> {
     failed = false;
@@ -116,18 +113,13 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
   parent.append(slot);
 
   function fillLocation(state: SyncStatus): void {
-    const option = (key: string, name: string) => {
-      const element = node('option', name);
-      element.value = key;
-      return element;
-    };
-    collection.replaceChildren(library);
+    collection.popup.replaceChildren(library);
     for (const { key, name } of sync.locations()) {
-      if (key) collection.append(option(key, name));
+      if (key) collection.appendItem(key, name);
     }
     title.value = state.location.title;
-    collection.value = state.location.collection ?? '';
-    if (collection.selectedIndex < 0) collection.selectedIndex = 0;
+    collection.control.value = state.location.collection ?? '';
+    if (collection.control.selectedIndex < 0) collection.control.selectedIndex = 0;
   }
 
   location.addEventListener('toggle', () => {
@@ -138,7 +130,7 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
     const next = title.value.trim();
     if (next)
       void run(async () => {
-        await sync.rename({ title: next, collection: collection.value || undefined });
+        await sync.rename({ title: next, collection: collection.control.value || undefined });
         if (!disposed && sync.status().kind !== 'error') location.open = false;
       });
   });
@@ -162,8 +154,9 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
     disable.hidden = off;
     notice.hidden = !message;
     notice.textContent = message ? t(message) : '';
-    for (const control of [enable, disable, now, cloud, local, restore, title, collection, save])
+    for (const control of [enable, disable, now, cloud, local, restore, title, save])
       control.disabled = state.busy;
+    collection.control.disabled = state.busy;
     now.hidden = off;
     cloud.hidden = local.hidden = !attention;
     restore.hidden = off || !state.canRestore;
@@ -179,6 +172,7 @@ export function mountSyncControls(parent: HTMLElement, sync: SyncPort, language:
       language = value;
       t = messages(captions, language);
       for (const [text, key] of labels) text.data = t(key);
+      library.setAttribute('label', t('root'));
       render();
     },
     dispose(): void {
