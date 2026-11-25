@@ -520,7 +520,7 @@ describe('Zotero Bases workspace', () => {
     );
   });
 
-  it('keeps calendar picks inside the editor and only writes a valid date on Enter', async () => {
+  it('saves a calendar pick in one click, but validates typed dates and discards drafts', async () => {
     const { host } = fixture(
       [{ ...sample, extra: 'ReadOn: 2024-02-01' }],
       { ...defaultView, columns: ['property:ReadOn'] },
@@ -539,33 +539,38 @@ describe('Zotero Bases workspace', () => {
     leapDay().focus();
     expect(root.querySelector('.zb-editor')).not.toBeNull();
     leapDay().click();
-    expect(field.value).toBe('2024-02-29');
-    expect(document.activeElement).toBe(field);
+    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(1, 'ReadOn', '2024-02-29');
+    expect(root.querySelector('.zb-editor')).toBeNull();
+    await settle();
+    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-29');
+    expect(document.activeElement).toBe(cell(root, 'property:ReadOn'));
+
+    field = open();
+    type(field, '2024-02-10');
+    header(root, 'property:ReadOn').focus();
+    expect(root.querySelector('.zb-editor')).toBeNull();
+    field = open();
+    type(field, '2024-02-11');
     focusedKey('Escape');
-    expect(host.setProperty).not.toHaveBeenCalled();
-    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-01');
+    expect(host.setProperty).toHaveBeenCalledTimes(1);
+    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-29');
 
     field = open();
     type(field, '2023-02-29');
     focusedKey('Enter');
     expect(document.activeElement).toBe(field);
     expect(field.getAttribute('aria-invalid')).toBe('true');
-    expect(host.setProperty).not.toHaveBeenCalled();
-    type(field, '2024-02-29');
+    expect(host.setProperty).toHaveBeenCalledTimes(1);
+    type(field, '2024-03-01');
     focusedKey('Enter');
     await settle();
-    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(1, 'ReadOn', '2024-02-29');
-    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-29');
+    expect(host.setProperty).toHaveBeenLastCalledWith(1, 'ReadOn', '2024-03-01');
+    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-03-01');
 
-    field = open();
-    click(get(root, '.zb-inline-calendar'), 'Clear');
-    expect(field.value).toBe('');
-    header(root, 'property:ReadOn').focus();
-    expect(root.querySelector('.zb-editor')).toBeNull();
-    expect(host.setProperty).toHaveBeenCalledTimes(1);
     open();
     click(get(root, '.zb-inline-calendar'), 'Clear');
-    focusedKey('Enter');
+    expect(root.querySelector('.zb-editor')).toBeNull();
+    expect(host.setProperty).toHaveBeenCalledTimes(3);
     expect(host.setProperty).toHaveBeenLastCalledWith(1, 'ReadOn', null);
   });
 

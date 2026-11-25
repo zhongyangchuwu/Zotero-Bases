@@ -260,8 +260,9 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   const root = parent.ownerDocument.createElementNS(HTML, 'div') as HTMLElement;
   root.dataset.zoteroBases = '';
   root.tabIndex = -1;
+  // Keep wide tables from sizing Zotero's XUL deck, without reanchoring fixed overlays.
   root.style.cssText =
-    'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;contain:paint style;';
+    'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;contain:inline-size style;isolation:isolate;';
   parent.append(root);
   const media = session.owner.matchMedia('(prefers-color-scheme: dark)');
   const nativePane = session.owner.document.getElementById('zotero-pane');

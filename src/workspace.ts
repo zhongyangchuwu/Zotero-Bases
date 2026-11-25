@@ -506,7 +506,7 @@ function mountWorkspaceSurface(
       const afterBlur: EventListener = (event) => {
         if (event.target !== focused) return;
         region.removeEventListener('focusout', afterBlur);
-        queueMicrotask(() => {
+        void Promise.resolve().then(() => {
           if (disposed || pendingRenders.get(region) !== afterBlur) return;
           pendingRenders.delete(region);
           renderRegion(region, draw);
@@ -1673,7 +1673,7 @@ function mountWorkspaceSurface(
           delete field.dataset.keepFocus;
           setGrouping(next);
         };
-        field.addEventListener('change', () => queueMicrotask(commit));
+        field.addEventListener('change', () => void Promise.resolve().then(commit));
         field.addEventListener('keydown', (event) => {
           if (event.key === 'Enter' && !event.isComposing) commit();
         });
@@ -3495,7 +3495,7 @@ function mountWorkspaceSurface(
       controls.style.left = `${Math.max(minX, Math.min(x, maxX - width))}px`;
       controls.style.top = `${Math.max(minY, Math.min(y, maxY - height))}px`;
     };
-    queueMicrotask(() => {
+    void Promise.resolve().then(() => {
       if (closeEditor === close) positionEditor?.();
     });
     function close(restore: boolean): void {
@@ -3511,7 +3511,7 @@ function mountWorkspaceSurface(
       // Keep the input and controls stable during notifier refreshes, including
       // when a mutation would filter its own row out of the current view.
       if (!disposed && result !== atOpen)
-        queueMicrotask(() => {
+        void Promise.resolve().then(() => {
           if (!closeEditor) renderTable();
         });
     }
@@ -3579,9 +3579,7 @@ function mountWorkspaceSurface(
           clear: t('clear'),
         },
         onSelect(value) {
-          field.value = value ?? '';
-          field.removeAttribute('aria-invalid');
-          field.focus({ preventScroll: true });
+          save(value ?? '', true);
         },
       });
       calendar.element.addEventListener('mousedown', (event) => {
