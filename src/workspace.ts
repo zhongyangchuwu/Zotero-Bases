@@ -380,6 +380,7 @@ function mountWorkspaceSurface(
   let restoreGridFocus = false;
   let virtualFrame: number | undefined;
   let resetMeasurements = false;
+  let widthAnchor: { index: number; within: number; atEnd: boolean } | undefined;
   let rowGeometryDirty = true;
   let measuredEm = 0;
   let searchTerm = restored?.search.trim() ?? '';
@@ -1050,7 +1051,7 @@ function mountWorkspaceSurface(
     }
     if (changedActive || changedDensity) syncDensity();
     if (changedActive || changedWidths) updateTableWidths();
-    else if (previousView.frozenCount !== view.frozenCount) updateFrozenColumns();
+    if (previousView.frozenCount !== view.frozenCount) updateFrozenColumns();
     if (changedViews) renderTabs();
     if (changedScope || changedActive) renderScope();
     if (changedProperties) {
@@ -2582,6 +2583,7 @@ function mountWorkspaceSurface(
 
   function renderTable(resetScroll = false): void {
     if (disposed) return;
+    widthAnchor = undefined;
     const view = activeView();
     const items = result?.rows;
     const oldTop = layout.indexAt(tableWrap.scrollTop);
@@ -2867,9 +2869,11 @@ function mountWorkspaceSurface(
       wantedTop ?? tableWrap.scrollTop,
       Math.max(0, layout.totalHeight - height),
     );
-    const anchor = layout.indexAt(initial);
-    const within = anchor < 0 ? 0 : initial - layout.offset(anchor);
-    const atEnd = initial > 0 && initial + height >= layout.totalHeight - 2;
+    const held = wantedTop === undefined ? widthAnchor : undefined;
+    widthAnchor = undefined;
+    const anchor = held?.index ?? layout.indexAt(initial);
+    const within = held?.within ?? (anchor < 0 ? 0 : initial - layout.offset(anchor));
+    const atEnd = held?.atEnd ?? (initial > 0 && initial + height >= layout.totalHeight - 2);
     let heightChanged = false;
     let invalidate = resetMeasurements;
     if (rowGeometryDirty) {
@@ -3250,6 +3254,19 @@ function mountWorkspaceSurface(
     renderTable();
   }
 
+  function holdWidthAnchor(): void {
+    if (widthAnchor || !tableBody || activeView().density !== 'wrap') return;
+    // Changing column widths can clamp the native scrollTop before the next frame.
+    const top = tableWrap.scrollTop;
+    const index = layout.indexAt(top);
+    if (index < 0) return;
+    widthAnchor = {
+      index,
+      within: top - layout.offset(index),
+      atEnd: top > 0 && top + tableWrap.clientHeight >= tableWrap.scrollHeight - 2,
+    };
+  }
+
   function widthGeometryChanged(): void {
     updateFrozenColumns();
     resetMeasurements = activeView().density === 'wrap';
@@ -3260,18 +3277,25 @@ function mountWorkspaceSurface(
   function updateTableWidths(table = tableWrap.querySelector('table')): void {
     if (!table) return;
     const view = activeView();
+    const connected = table.isConnected;
+    let changed = false;
     let total = SELECT_COLUMN_WIDTH + COLUMN_ACTION_WIDTH;
     const headers = table.tHead?.rows[0]?.cells;
     const columns = table.querySelectorAll<HTMLTableColElement>('col[data-column]');
     for (let index = 0; index < columns.length; index++) {
       const col = columns[index]!;
       const width = columnWidth(view, col.dataset.column as Column);
-      col.style.width = `${width}px`;
+      const size = `${width}px`;
+      if (col.style.width !== size) {
+        if (connected && !changed) holdWidthAnchor();
+        changed = true;
+        col.style.width = size;
+      }
       headers?.[index + 1]?.lastElementChild?.setAttribute('aria-valuenow', String(width));
       total += width;
     }
     table.style.width = `${total}px`;
-    if (table.isConnected) widthGeometryChanged();
+    if (connected && changed) widthGeometryChanged();
   }
 
   function setColumnWidth(column: Column, width: number): void {
@@ -3309,7 +3333,7 @@ function mountWorkspaceSurface(
     };
     grip.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || drag) return;
-      grip.focus();
+      grip.focus({ preventScroll: true });
       grip.setPointerCapture?.(event.pointerId);
       drag = {
         id: event.pointerId,
@@ -3326,6 +3350,7 @@ function mountWorkspaceSurface(
       if (event.pointerId !== drag?.id) return;
       const width = bound(drag.width + (event.clientX - drag.x) * drag.sign);
       if (parseFloat(col.style.width) === width) return;
+      holdWidthAnchor();
       col.style.width = `${width}px`;
       table.style.width = `${drag.total + width - drag.width}px`;
       grip.setAttribute('aria-valuenow', String(width));

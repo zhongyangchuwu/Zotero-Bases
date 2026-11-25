@@ -686,6 +686,44 @@ describe('Zotero Bases workspace', () => {
     expect(root.querySelector('[data-frozen]')).toBeNull();
   });
 
+  it('keeps the last wrapped row in view when measuring a resize clamps native scrollTop', async () => {
+    const rows = Array.from({ length: 320 }, (_, index) => ({ ...sample, id: index + 1 }));
+    const { host } = fixture(rows, {
+      ...defaultView,
+      columns: ['title', 'year'],
+      sorts: [],
+      density: 'wrap',
+      frozenCount: 1,
+    });
+    const { root } = attach(host);
+    await settle();
+    const viewport = get(root, '.zb-table-wrap');
+    Object.defineProperties(viewport, {
+      clientHeight: { value: 500 },
+      clientWidth: { value: 720 },
+      scrollHeight: { value: 320 * 34 },
+    });
+    const bottom = viewport.scrollHeight - viewport.clientHeight;
+    await scrollGrid(viewport, bottom);
+    expect(rowIds(root).at(-1)).toBe(320);
+    const title = header(root, 'title').parentElement!;
+    const column = get<HTMLTableColElement>(root, 'col[data-column=title]');
+    const oldWidth = column.style.width;
+    let clamped = false;
+    vi.spyOn(title, 'getBoundingClientRect').mockImplementation(() => {
+      if (!clamped && column.style.width !== oldWidth) {
+        // The layout read occurs after the width write and can clamp the viewport immediately.
+        clamped = true;
+        viewport.scrollTop = bottom - 1200;
+      }
+      return new DOMRect(36, 0, parseFloat(column.style.width), 34);
+    });
+    key(get(title, '.zb-column-grip'), 'ArrowRight');
+    await vi.waitFor(() => expect(viewport.scrollTop).toBe(bottom));
+    expect(clamped).toBe(true);
+    expect(rowIds(root).at(-1)).toBe(320);
+  });
+
   it('selects a link cell as usual and only opens or copies through its explicit buttons', async () => {
     const open = vi.fn();
     const copy = vi.fn();
