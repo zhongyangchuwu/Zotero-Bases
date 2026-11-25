@@ -33,6 +33,11 @@ const properties: readonly Property[] = [
   { key: 'Status', type: 'single-select', options: ['Reading', 'Done'] },
   { key: 'Method', type: 'multi-select', options: ['Survey', 'Simulation'] },
 ];
+const researchProperties: readonly Property[] = [
+  { key: 'Impact', type: 'rating' },
+  { key: 'Repository', type: 'url' },
+  { key: 'ReadOn', type: 'date' },
+];
 const defaultView: View = {
   id: 'default',
   name: 'Library',
@@ -79,9 +84,13 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-function fixture(rows: readonly Row[] = [sample], view: View = defaultView) {
+function fixture(
+  rows: readonly Row[] = [sample],
+  view: View = defaultView,
+  schema: readonly Property[] = properties,
+) {
   let entries = rows;
-  let settings: Preferences = { properties, views: [view], active: view.id };
+  let settings: Preferences = { properties: schema, views: [view], active: view.id };
   const { prefs } = preferences();
   const config = createConfig(prefs, () => view.scope, validate, { initializeDefault: false });
   const handlers = new Set<Parameters<WorkspaceHost['subscribe']>[0]>();
@@ -358,6 +367,7 @@ describe('Zotero Bases workspace', () => {
     click(root, 'Copy view');
     expect(active(host)).toMatchObject({ name: 'New view (copy)', scope: 'group' });
     expect(active(host).id).not.toBe(created.id);
+    expect(active(host).frozenCount).toBe(1);
     expect(active(host).filters[0]?.value).toBe('Alpha 1');
     openTool(root, 'View actions');
     click(root, 'Rename view');
@@ -370,6 +380,7 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).id).toBe(created.id);
     click(root, 'Library');
     expect(active(host).id).toBe('default');
+    expect(active(host).frozenCount).toBeUndefined();
   });
 
   it('keeps the header Columns popover anchored through order, visibility, and default resets', async () => {
@@ -471,6 +482,210 @@ describe('Zotero Bases workspace', () => {
     expect(host.load).toHaveBeenCalledTimes(1);
   });
 
+  it('opens and edits custom links independently, without saving or opening unsafe URLs', async () => {
+    const open = vi.fn();
+    const copy = vi.fn();
+    const { host } = fixture(
+      [
+        { ...sample, extra: 'Repository: https://example.org/source' },
+        { ...sample, id: 2, extra: 'Repository: javascript:alert(1)' },
+      ],
+      { ...defaultView, columns: ['property:Repository'] },
+      researchProperties,
+    );
+    const { root } = attach(host, { language: 'en', linkActions: { open, copy } });
+    await settle();
+    const linkCell = cell(root, 'property:Repository');
+    expect(cell(root, 'property:Repository', 2).querySelector('.zb-link-open')).toBeNull();
+    linkCell.click();
+    expect(document.activeElement).toBe(linkCell);
+    expect(linkCell.querySelector('.zb-editor')).toBeNull();
+    expect(open).not.toHaveBeenCalled();
+    get<HTMLButtonElement>(linkCell, '.zb-link-open').click();
+    expect(open).toHaveBeenCalledExactlyOnceWith('https://example.org/source');
+
+    focusedKey('Enter');
+    const field = get<HTMLInputElement>(linkCell, '.zb-editor input');
+    type(field, 'javascript:alert(1)');
+    focusedKey('Enter');
+    expect(document.activeElement).toBe(field);
+    expect(field.getAttribute('aria-invalid')).toBe('true');
+    expect(host.setProperty).not.toHaveBeenCalled();
+    type(field, 'http://example.org/new');
+    focusedKey('Enter');
+    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(
+      1,
+      'Repository',
+      'http://example.org/new',
+    );
+  });
+
+  it('keeps calendar picks inside the editor and only writes a valid date on Enter', async () => {
+    const { host } = fixture(
+      [{ ...sample, extra: 'ReadOn: 2024-02-01' }],
+      { ...defaultView, columns: ['property:ReadOn'] },
+      researchProperties,
+    );
+    const { root } = attach(host);
+    await settle();
+    const open = () => {
+      cell(root, 'property:ReadOn').focus();
+      focusedKey('Enter');
+      return get<HTMLInputElement>(root, '.zb-editor input');
+    };
+    let field = open();
+    expect(field.type).toBe('text');
+    const leapDay = () => get<HTMLButtonElement>(root, '.zb-editor button[data-date="2024-02-29"]');
+    leapDay().focus();
+    expect(root.querySelector('.zb-editor')).not.toBeNull();
+    leapDay().click();
+    expect(field.value).toBe('2024-02-29');
+    expect(document.activeElement).toBe(field);
+    focusedKey('Escape');
+    expect(host.setProperty).not.toHaveBeenCalled();
+    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-01');
+
+    field = open();
+    type(field, '2023-02-29');
+    focusedKey('Enter');
+    expect(document.activeElement).toBe(field);
+    expect(field.getAttribute('aria-invalid')).toBe('true');
+    expect(host.setProperty).not.toHaveBeenCalled();
+    type(field, '2024-02-29');
+    focusedKey('Enter');
+    await settle();
+    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(1, 'ReadOn', '2024-02-29');
+    expect(cell(root, 'property:ReadOn').textContent).toBe('2024-02-29');
+
+    field = open();
+    click(get(root, '.zb-inline-calendar'), 'Clear');
+    expect(field.value).toBe('');
+    header(root, 'property:ReadOn').focus();
+    expect(root.querySelector('.zb-editor')).toBeNull();
+    expect(host.setProperty).toHaveBeenCalledTimes(1);
+    open();
+    click(get(root, '.zb-inline-calendar'), 'Clear');
+    focusedKey('Enter');
+    expect(host.setProperty).toHaveBeenLastCalledWith(1, 'ReadOn', null);
+  });
+
+  it('rates writable cells with digits and applies all three bulk types only to the selected rows', async () => {
+    const { host } = fixture(
+      [
+        { ...sample, extra: 'DOI: 10.1000/a\nImpact: 1\nImpact: 1' },
+        { ...sample, id: 2, writable: false, extra: 'Impact: 2' },
+        { ...sample, id: 3, extra: 'Impact: 5' },
+      ],
+      { ...defaultView, columns: ['property:Impact', 'property:Repository', 'property:ReadOn'] },
+      researchProperties,
+    );
+    const { root } = attach(host);
+    await settle();
+    cell(root, 'property:Impact').focus();
+    expect(focusedKey('4', { isComposing: true })).toBe(true);
+    expect(focusedKey('4', { repeat: true })).toBe(true);
+    expect(focusedKey('4', { ctrlKey: true })).toBe(true);
+    expect(focusedKey('4', { altKey: true })).toBe(true);
+    expect(focusedKey('4', { metaKey: true })).toBe(true);
+    expect(host.setProperty).not.toHaveBeenCalled();
+    expect(focusedKey('4')).toBe(false);
+    await settle();
+    expect(get(cell(root, 'property:Impact'), '[aria-pressed="true"]').dataset.rating).toBe('4');
+    expect(focusedKey('0')).toBe(false);
+    await settle();
+    expect(host.setProperty.mock.calls).toEqual([
+      [1, 'Impact', '4'],
+      [1, 'Impact', null],
+    ]);
+    cell(root, 'property:Impact', 2).focus();
+    expect(focusedKey('3')).toBe(true);
+    cell(root, 'property:ReadOn').focus();
+    focusedKey('Enter');
+    expect(focusedKey('3')).toBe(true);
+    focusedKey('Escape');
+    expect(host.setProperty).toHaveBeenCalledTimes(2);
+
+    rowSelection(root, 1).click();
+    rowSelection(root, 2).click();
+    changeSelection(root, 'Bulk property', 'Impact');
+    changeSelection(root, 'Bulk value', '3');
+    await settle();
+    for (const [name, value] of [
+      ['Repository', 'https://example.org/code'],
+      ['ReadOn', '2024-02-05'],
+    ] as const) {
+      changeSelection(root, 'Bulk property', name);
+      type(get(root, 'input[aria-label="Bulk value"]'), value);
+      click(root, 'Set value');
+      await settle();
+    }
+    expect((await host.load('personal')).rows.map(({ extra }) => extra)).toEqual([
+      'DOI: 10.1000/a\nImpact: 3\nRepository: https://example.org/code\nReadOn: 2024-02-05',
+      'Impact: 2',
+      'Impact: 5',
+    ]);
+    click(root, 'Clear property values');
+    await settle();
+    expect((await host.load('personal')).rows[0]?.extra).toBe(
+      'DOI: 10.1000/a\nImpact: 3\nRepository: https://example.org/code\n',
+    );
+  });
+
+  it('pins measured columns and offsets on recycled rows, and reveals the next keyboard cell', async () => {
+    const rows = Array.from({ length: 320 }, (_, index) => ({ ...sample, id: index + 1 }));
+    const { host } = fixture(rows, {
+      ...defaultView,
+      columns: ['title', 'year', 'type'],
+      sorts: [],
+    });
+    const { root } = attach(host);
+    await settle();
+    const viewport = get(root, '.zb-table-wrap');
+    let width = 600;
+    Object.defineProperty(viewport, 'clientWidth', { get: () => width });
+    vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 0, width, 620));
+    const headings = Array.from(root.querySelectorAll('thead th'));
+    for (const [index, rendered] of [36, 240, 120, 90].entries())
+      vi.spyOn(headings[index]!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, rendered, 30),
+      );
+    expect(cell(root, 'title').hasAttribute('data-frozen')).toBe(false);
+    header(root, 'year').click();
+    click(root, 'Freeze through this column');
+    expect(active(host).frozenCount).toBe(2);
+    expect(cell(root, 'year').style.getPropertyValue('--zb-frozen-offset')).toBe('276px');
+    expect(viewport.hasAttribute('data-frozen-shadow')).toBe(false);
+
+    width = 500;
+    get(header(root, 'title').parentElement!, '.zb-column-grip').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    );
+    expect(active(host).frozenCount).toBe(2);
+    expect(cell(root, 'title').hasAttribute('data-frozen-end')).toBe(true);
+    expect(cell(root, 'year').hasAttribute('data-frozen')).toBe(false);
+    viewport.scrollLeft = 112;
+    await scrollGrid(viewport, 0);
+    expect(viewport.hasAttribute('data-frozen-shadow')).toBe(true);
+    const year = cell(root, 'year');
+    vi.spyOn(year, 'getBoundingClientRect').mockImplementation(
+      () => new DOMRect(286 - viewport.scrollLeft, 35, 120, 35),
+    );
+    cell(root, 'title').focus();
+    focusedKey('l');
+    expect(document.activeElement).toBe(year);
+    expect(year.getBoundingClientRect().left).toBe(286);
+    viewport.dispatchEvent(new Event('scroll'));
+    expect(viewport.hasAttribute('data-frozen-shadow')).toBe(false);
+    focusedKey('G', { shiftKey: true });
+    expect(rowIds(root).at(-1)).toBe(320);
+    expect(cell(root, 'title', 320).style.getPropertyValue('--zb-frozen-offset')).toBe('36px');
+
+    header(root, 'title').click();
+    click(root, 'Unfreeze columns');
+    expect(active(host).frozenCount).toBe(0);
+    expect(root.querySelector('[data-frozen]')).toBeNull();
+  });
+
   it('selects a link cell as usual and only opens or copies through its explicit buttons', async () => {
     const open = vi.fn();
     const copy = vi.fn();
@@ -504,7 +719,6 @@ describe('Zotero Bases workspace', () => {
     const { root, teardown } = attach(host);
     await settle();
     const title = header(root, 'title');
-    const table = title.closest('tr')!;
     for (const [index, column] of active(host).columns.entries()) {
       const left = 40 + index * 100;
       vi.spyOn(header(root, column).parentElement!, 'getBoundingClientRect').mockReturnValue(
@@ -518,10 +732,11 @@ describe('Zotero Bases workspace', () => {
     };
     pointer('down', 80);
     pointer('move', 82);
-    expect(table.querySelector('[data-drop]')).toBeNull();
+    expect(root.querySelector('.zb-column-drop')).toBeNull();
     pointer('move', 220);
-    expect(header(root, 'type').parentElement?.dataset.drop).toBe('before');
+    expect(get(root, '.zb-column-drop').style.left).toBe('240px');
     pointer('up', 220);
+    expect(root.querySelector('.zb-column-drop')).toBeNull();
     title.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
     expect(root.querySelector('.zb-popover')).toBeNull();
     expect(active(host).columns).toEqual(['year', 'title', 'type']);

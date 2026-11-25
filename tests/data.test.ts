@@ -841,6 +841,59 @@ describe('Zotero Bases host', () => {
     expect(editable.saveTx).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { property: { key: 'Stars', type: 'rating' }, value: '4', invalid: '04' },
+    {
+      property: { key: 'Project Link', type: 'url' },
+      value: 'https://example.org/repo',
+      invalid: 'javascript:void(0)',
+    },
+    { property: { key: 'Read On', type: 'date' }, value: '2024-02-29', invalid: '2024-02-30' },
+  ] as const)(
+    'validates, bulk edits, and cleans up $property.type Extra',
+    async ({ property, value, invalid }) => {
+      const { key } = property;
+      const before = `DOI: preserve\r\n${key}: ${value}\n${key}-notes: keep\n${key}: ${invalid}\nFree text`;
+      const first = nativeItem(1, 1, before);
+      const second = nativeItem(2, 8, 'First line\n');
+      const unselected = nativeItem(3, 1, before);
+      const { host } = harness([first, second, unselected]);
+      await host.change({ kind: 'define', property });
+      expect(host.settings().properties).toEqual([property]);
+      await expect(host.setProperty(1, key, invalid)).rejects.toThrow();
+      await expect(host.bulk([1, 2], { kind: 'property', key, value: invalid })).rejects.toThrow();
+      expect(first.saveTx).not.toHaveBeenCalled();
+      expect(second.saveTx).not.toHaveBeenCalled();
+
+      await expect(host.bulk([1, 2], { kind: 'property', key, value })).resolves.toEqual({
+        changed: 2,
+        skipped: 0,
+        readOnly: 0,
+      });
+      expect(first.savedExtra()).toBe(
+        `DOI: preserve\r\n${key}-notes: keep\n${key}: ${value}\nFree text`,
+      );
+      expect(second.savedExtra()).toBe(`First line\n${key}: ${value}`);
+      expect(unselected.savedExtra()).toBe(before);
+      expect(unselected.saveTx).not.toHaveBeenCalled();
+
+      await expect(host.bulk([2], { kind: 'property', key, value: null })).resolves.toEqual({
+        changed: 1,
+        skipped: 0,
+        readOnly: 0,
+      });
+      expect(second.savedExtra()).toBe('First line\n');
+      await expect(host.change({ kind: 'delete-property', key, clean: true })).resolves.toEqual({
+        changed: 2,
+        skipped: 0,
+      });
+      const remaining = `DOI: preserve\r\n${key}-notes: keep\nFree text`;
+      expect(first.savedExtra()).toBe(remaining);
+      expect(unselected.savedExtra()).toBe(remaining);
+      expect(host.settings().properties).toEqual([]);
+    },
+  );
+
   it('bulk changes native tags without rewriting automatic tags or counting no-ops', async () => {
     const editable = nativeItem(1, 1);
     const locked = nativeItem(2, 9);

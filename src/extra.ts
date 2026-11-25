@@ -1,4 +1,5 @@
 import { OPTION_COLORS, type OptionColorKey, type Property, type PropertyValue } from './contracts';
+import { isISODate, isRating, webURL } from './property-values';
 import { BASES_SYNC_KEY } from './sync-marker';
 
 const LINE_BREAK = /\r\n|[\r\n\u0085\u2028\u2029]/;
@@ -160,6 +161,12 @@ export function readProperty(extra: string, property: Property): PropertyValue {
       return value || null;
     case 'number':
       return value && isDecimal(value) ? value : null;
+    case 'rating':
+      return value && isRating(value) ? value : null;
+    case 'url':
+      return value && webURL(value) ? value : null;
+    case 'date':
+      return value && isISODate(value) ? value : null;
     case 'checkbox':
       return value === 'true';
     case 'single-select':
@@ -190,6 +197,18 @@ function encode(property: Property, value: PropertyValue): string | null {
       }
       throw new Error('Enter a finite decimal number.');
     }
+    case 'rating':
+      if (typeof value === 'string' && isRating(value)) return value;
+      throw new Error('Enter a whole rating from 1 to 5.');
+    case 'url':
+      if (typeof value === 'string' && !LINE_BREAK.test(value)) {
+        const text = value.trim();
+        if (webURL(text)) return text;
+      }
+      throw new Error('Enter a valid HTTP or HTTPS URL.');
+    case 'date':
+      if (typeof value === 'string' && isISODate(value)) return value;
+      throw new Error('Enter a valid date in YYYY-MM-DD format.');
     case 'checkbox':
       if (typeof value === 'boolean') return value ? 'true' : null;
       throw new Error('Checkbox values must be true or false.');

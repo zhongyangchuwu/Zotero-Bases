@@ -337,6 +337,27 @@ export const workspaceCSS = String.raw`
   background: var(--zb-surface);
   padding-inline-end: 0.65rem;
 }
+.zb-workspace :is(th, td)[data-frozen] {
+  position: sticky;
+  inset-inline-start: var(--zb-frozen-offset);
+}
+.zb-workspace td[data-frozen] {
+  z-index: 2;
+  background: var(--zb-bg);
+}
+.zb-workspace tr:hover > td[data-frozen] {
+  background: linear-gradient(var(--zb-row-hover), var(--zb-row-hover)), var(--zb-bg);
+}
+.zb-workspace tr[data-selected='true'] > td[data-frozen] {
+  background: linear-gradient(var(--zb-selected), var(--zb-selected)), var(--zb-bg);
+}
+.zb-workspace th[data-frozen] { z-index: 4; }
+.zb-workspace [data-frozen-shadow] [data-frozen-end] {
+  box-shadow: 7px 0 8px -7px color-mix(in srgb, var(--zb-text) 52%, transparent);
+}
+.zb-workspace [data-frozen-shadow]:dir(rtl) [data-frozen-end] {
+  box-shadow: -7px 0 8px -7px color-mix(in srgb, var(--zb-text) 52%, transparent);
+}
 .zb-workspace th button {
   appearance: none;
   display: block;
@@ -386,17 +407,14 @@ export const workspaceCSS = String.raw`
   color: light-dark(#2865a2, #91c9ff);
 }
 .zb-workspace .zb-header-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.zb-workspace th[data-drop='before']::before, .zb-workspace th[data-drop='after']::before {
-  content: '';
-  position: absolute;
-  inset-block: 0;
+.zb-workspace .zb-column-drop {
+  position: fixed;
   width: 2px;
   background: var(--zb-accent);
-  z-index: 1;
+  z-index: 5;
+  margin-left: -1px;
   pointer-events: none;
 }
-.zb-workspace th[data-drop='before']::before { inset-inline-start: 0; }
-.zb-workspace th[data-drop='after']::before { inset-inline-end: 0; }
 .zb-workspace th.zb-table-tail { padding-inline: 3px 5px; }
 .zb-workspace .zb-table-tail > button {
   margin-inline-start: auto;
@@ -462,17 +480,20 @@ export const workspaceCSS = String.raw`
   outline-offset: -2px;
 }
 .zb-workspace tbody tr[data-item-id] > td:has(> .zb-editor) {
-  position: relative;
   overflow: visible;
-  z-index: 2;
+  z-index: 6;
 }
+.zb-workspace tbody td:not([data-frozen]):has(> .zb-editor) { position: relative; }
 .zb-workspace .zb-editor-opener { visibility: hidden; }
 .zb-workspace tbody tr:hover { background: var(--zb-row-hover); }
 .zb-workspace tbody td:focus:not([data-active-cell]) { outline-offset: -2px; }
 .zb-workspace .zb-select-cell { padding-inline: 0; text-align: center; vertical-align: middle; }
 .zb-workspace tbody tr[data-selected='true'] { background: var(--zb-selected); }
-.zb-workspace .zb-group > td { background: var(--zb-bg); }
+.zb-workspace tbody tr.zb-group > td { background: var(--zb-bg); overflow: visible; }
 .zb-workspace .zb-group-toggle {
+  position: sticky;
+  inset-inline-start: 0.55rem;
+  max-inline-size: min(65vw, 32em);
   font-weight: 600;
   text-align: start;
   overflow-wrap: anywhere;
@@ -501,7 +522,41 @@ export const workspaceCSS = String.raw`
   border-color: var(--zb-pill-border);
 }
 .zb-workspace .zb-item-title { color: var(--zb-text); font-weight: 600; }
-.zb-workspace td[data-column='title'] { position: relative; }
+.zb-workspace .zb-cell-date.zb-cell-monospace,
+.zb-workspace .zb-cell-date.zb-cell-monospace > button { font-family: ui-monospace, monospace; }
+.zb-workspace .zb-rating { display: inline-flex; vertical-align: middle; max-width: 100%; }
+.zb-workspace .zb-rating-star {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  width: 1.24em;
+  min-height: 1.45em;
+  border-color: transparent;
+  background: transparent;
+  color: color-mix(in srgb, var(--zb-text) 31%, transparent);
+}
+.zb-workspace .zb-rating-star[aria-pressed='true'] { border-color: transparent; background: transparent; }
+.zb-workspace .zb-rating-star[data-filled] { color: light-dark(#946100, #f0b951); }
+.zb-workspace .zb-rating-star[data-filled] .zb-rating-icon { fill: currentColor; }
+.zb-workspace .zb-rating-star svg { width: 1em; height: 1em; }
+.zb-workspace .zb-rating-star:is(:hover, :focus-visible):not(:disabled) { color: light-dark(#946100, #f0b951); }
+.zb-workspace .zb-rating[data-empty] { opacity: 0; }
+.zb-workspace .zb-rating-cell:is(:hover, :focus-within, [data-active-cell]) .zb-rating { opacity: 1; }
+.zb-workspace .zb-cell-url .zb-url-value { display: inline-block; width: auto; max-width: 100%; vertical-align: middle; }
+.zb-workspace .zb-cell-url .zb-url-edit {
+  position: absolute;
+  inset-inline-end: 0.45rem;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  width: auto;
+  visibility: hidden;
+  background: var(--zb-surface);
+}
+.zb-workspace .zb-url-edit svg { display: block; width: 1em; height: 1em; }
+.zb-workspace .zb-cell-url:is(:hover, :focus-within) .zb-url-edit:not(.zb-editor-opener) { visibility: visible; }
+.zb-workspace td.zb-cell-url:not([data-frozen]) { position: relative; }
+.zb-workspace td[data-column='title']:not([data-frozen]) { position: relative; }
 .zb-workspace .zb-title-actions {
   position: absolute;
   inset-inline-end: 0.35em;
@@ -643,12 +698,15 @@ export const workspaceCSS = String.raw`
   padding: 0;
 }
 .zb-workspace .zb-editor {
-  position: absolute;
-  inset-block-start: 1px;
-  inset-inline-start: 0;
-  min-width: min(16em, 64vw);
+  position: fixed;
+  box-sizing: border-box;
+  left: 0;
+  top: 0;
+  min-width: min(16em, 64vw, var(--zb-editor-width, 64vw));
   width: max-content;
-  max-width: min(28em, 80vw);
+  max-width: min(28em, 80vw, var(--zb-editor-width, 80vw));
+  max-height: var(--zb-editor-height, none);
+  overflow: auto;
   border: 1px solid var(--zb-border);
   border-radius: 0.35rem;
   background: var(--zb-surface);
@@ -656,10 +714,27 @@ export const workspaceCSS = String.raw`
   padding: 0.38em;
   white-space: normal;
 }
-.zb-workspace .zb-editor[data-above] { inset-block-start: auto; inset-block-end: 1px; }
-.zb-workspace .zb-editor[data-end] { inset-inline-start: auto; inset-inline-end: 0; }
 .zb-workspace .zb-editor .zb-line + .zb-line { margin-block-start: 0.35rem; }
 .zb-workspace .zb-editor .zb-options { max-height: 9em; overflow: auto; }
+.zb-workspace .zb-inline-calendar { margin-block-start: 0.38em; }
+.zb-workspace .zb-calendar-header, .zb-workspace .zb-calendar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35em;
+}
+.zb-workspace .zb-calendar-title { text-align: center; font-weight: 600; }
+.zb-workspace .zb-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.12em;
+  margin: 0.28em 0;
+  font-variant-numeric: tabular-nums;
+}
+.zb-workspace .zb-calendar-weekday { color: var(--zb-muted); text-align: center; }
+.zb-workspace .zb-calendar-day { padding-inline: 0.1em; border-color: transparent; background: transparent; }
+.zb-workspace .zb-calendar-day[aria-current='date'] { border-color: var(--zb-border); }
+.zb-workspace .zb-calendar-day[aria-pressed='true'] { border-color: var(--zb-accent); }
 .zb-workspace .zb-empty { color: var(--zb-muted); padding: 0.7rem; }
 .zb-workspace .zb-table-status {
   display: flex;

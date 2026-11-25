@@ -9,6 +9,10 @@ const properties: readonly Property[] = [
   { key: 'Reviewed', type: 'checkbox' },
   { key: 'Status', type: 'single-select', options: ['Reading', 'Done'] },
   { key: 'Method', type: 'multi-select', options: ['Transformer', 'Diffusion'] },
+  { key: 'Stars', type: 'rating' },
+  { key: 'Project Link', type: 'url' },
+  { key: 'Code Link', type: 'url' },
+  { key: 'Read On', type: 'date' },
 ];
 
 function row(id: number, fields: Partial<Omit<Row, 'id'>> = {}): Row {
@@ -100,6 +104,14 @@ describe('cells and filter forms', () => {
     expect(cellValue(record, 'property:Status', properties)).toBe('Reading');
     expect(cellValue(record, 'property:Method', properties)).toEqual(['Diffusion', 'Retired']);
     expect(cellValue(record, 'property:Removed', properties)).toBeNull();
+    const typed = row(38, {
+      extra: 'Stars: 5\nProject Link: https://example.org/project\nRead On: 2024-02-29',
+    });
+    expect(cellValue(typed, 'property:Stars', properties)).toBe('5');
+    expect(cellValue(typed, 'property:Project Link', properties)).toBe(
+      'https://example.org/project',
+    );
+    expect(cellValue(typed, 'property:Read On', properties)).toBe('2024-02-29');
   });
 
   it('provides the operators supported by each field kind', () => {
@@ -141,6 +153,94 @@ describe('cells and filter forms', () => {
       'missing',
     ]);
     expect(filterOperators('property:Removed', properties)).toEqual([]);
+  });
+});
+
+describe('rating, URL, and date queries', () => {
+  const items: Catalog = {
+    rows: [
+      row(1, { extra: 'Stars: 5\nProject Link: https://z.example/Code\nRead On: 2024-03-01' }),
+      row(2, { extra: 'Stars: 1\nProject Link: https://a.example/Home\nRead On: 2023-12-31' }),
+      row(3, { extra: 'Stars: 03\nProject Link: javascript:void(0)\nRead On: 2024-02-30' }),
+      row(4, { extra: 'Stars: 3\nRead On: 2024-02-29' }),
+      row(5, { extra: 'Stars: 5\nRead On: 2024-01-31' }),
+      row(6, { extra: 'Read On: 2024-02-29T00:00:00Z' }),
+    ],
+    tags: new Set(),
+  };
+
+  function checkFilters(
+    column: Column,
+    cases: readonly (readonly [Filter['operator'], string, readonly number[]])[],
+  ) {
+    expect(filterOperators(column, properties)).toEqual(cases.map(([operator]) => operator));
+    for (const [operator, value, ids] of cases) {
+      const result = queryCatalog(items, view([{ column, operator, value }]), properties, 'en');
+      expect(result.invalid).toEqual([]);
+      expect(result.rows.map(({ id }) => id)).toEqual(ids);
+    }
+  }
+
+  it('validates rating filter operands and keeps malformed ratings out of comparisons', () => {
+    const column = 'property:Stars';
+    checkFilters(column, [
+      ['equals', '5', [1, 5]],
+      ['notEquals', '5', [2, 4]],
+      ['gte', '3', [1, 4, 5]],
+      ['lte', '3', [2, 4]],
+      ['has', '', [1, 2, 4, 5]],
+      ['missing', '', [3, 6]],
+    ]);
+    const invalid = view([
+      { column, operator: 'equals', value: '05' },
+      { column, operator: 'lte', value: '6' },
+      { column, operator: 'lt', value: '3' },
+    ]);
+    expect(queryCatalog(items, invalid, properties, 'en').invalid).toEqual([0, 1, 2]);
+  });
+
+  it('matches URL text without treating missing or rejected URLs as text', () => {
+    checkFilters('property:Project Link', [
+      ['contains', 'code', [1]],
+      ['notContains', 'CODE', [2]],
+      ['has', '', [1, 2]],
+      ['missing', '', [3, 4, 5, 6]],
+    ]);
+  });
+
+  it('uses strict calendar days in comparisons, not native partial dates and timestamps', () => {
+    const column = 'property:Read On';
+    checkFilters(column, [
+      ['equals', '2024-02-29', [4]],
+      ['before', '2024-02-29', [2, 5]],
+      ['after', '2024-02-29', [1]],
+      ['has', '', [1, 2, 4, 5]],
+      ['missing', '', [3, 6]],
+    ]);
+    const invalid = view([
+      { column, operator: 'equals', value: '2024-02-30' },
+      { column, operator: 'after', value: '2024-02' },
+      { column, operator: 'before', value: '2024-02-29T00:00:00Z' },
+    ]);
+    expect(queryCatalog(items, invalid, properties, 'en').invalid).toEqual([0, 1, 2]);
+  });
+
+  it('orders rating numerically, date chronologically, and URL as text with missing last', () => {
+    const sorted: View = {
+      ...view([], 'property:Stars', 'desc'),
+      sorts: [
+        { column: 'property:Stars', direction: 'desc' },
+        { column: 'property:Read On', direction: 'asc' },
+      ],
+    };
+    const sortCases: readonly (readonly [View, readonly number[]])[] = [
+      [sorted, [5, 1, 4, 2, 3, 6]],
+      [view([], 'property:Read On', 'desc'), [1, 4, 5, 2, 3, 6]],
+      [view([], 'property:Project Link'), [2, 1, 3, 4, 5, 6]],
+      [view([], 'property:Project Link', 'desc'), [1, 2, 3, 4, 5, 6]],
+    ];
+    for (const [view, ids] of sortCases)
+      expect(queryCatalog(items, view, properties, 'en').rows.map(({ id }) => id)).toEqual(ids);
   });
 });
 
@@ -498,7 +598,7 @@ describe('catalog search', () => {
     expect(result.rows.map(({ id }) => id)).toEqual([1]);
   });
 
-  it('searches only visible custom values, including individual options and localized checkboxes', () => {
+  it('searches visible non-URL custom values, including options and localized checkboxes', () => {
     const visible: View = {
       ...view(),
       columns: [
@@ -524,6 +624,32 @@ describe('catalog search', () => {
     expect(
       queryCatalog(catalog, visible, properties, 'zh-CN', '否').rows.map(({ id }) => id),
     ).toEqual([3, 2]);
+  });
+
+  it('searches every custom URL even when its column and its row are off screen', () => {
+    const items: Catalog = {
+      rows: [
+        ...Array.from({ length: 319 }, (_, index) => row(index + 1)),
+        row(320, {
+          title: 'Research',
+          extra:
+            'Project Link: https://example.org/ResearchRepo\nCode Link: http://example.org/submission\nMemo: hidden-note\nRead On: 2024-02-29',
+        }),
+        row(321, {
+          extra:
+            'Project Link: javascript:ResearchRepo\nCode Link: https:///example.org/submission',
+        }),
+      ],
+      tags: new Set(),
+    };
+    const search = (term: string, visible = view()) =>
+      queryCatalog(items, visible, properties, 'en', term).rows.map(({ id }) => id);
+    expect(search('researchrepo submission')).toEqual([320]);
+    expect(search('researchrepo')).toEqual([320]);
+    expect(search('submission')).toEqual([320]);
+    expect(search('hidden-note')).toEqual([]);
+    expect(search('2024-02-29')).toEqual([]);
+    expect(search('hidden-note', { ...view(), columns: ['property:Memo'] })).toEqual([320]);
   });
 
   it('ANDs search with valid saved filters, preserves invalid indices and typed sorting', () => {

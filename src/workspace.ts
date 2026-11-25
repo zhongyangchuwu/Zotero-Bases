@@ -30,6 +30,7 @@ import {
 import { createCellRenderers, optionTone } from './cell-renderers';
 import { scopeCustomCSS } from './custom-css';
 import { createFieldIcon } from './field-icons';
+import { frozenColumns, horizontalReveal, type FrozenColumns } from './frozen-columns';
 import {
   DEFAULT_GLOBAL_PREFERENCES,
   resolveLanguage,
@@ -38,8 +39,10 @@ import {
 } from './global-preferences';
 import { groupRows, isGroupProperty, type RowGroup } from './grouping';
 import { messages, type Language } from './i18n';
+import { createInlineCalendar } from './inline-calendar';
 import { createPopover } from './popover';
 import { popoverCSS } from './popover.css';
+import { isISODate, webURL } from './property-values';
 import { cellValue, filterOperators, queryCatalog, type QueryResult } from './query';
 import type { SyncPort } from './sync';
 import { mountSyncBadge } from './sync-controls';
@@ -54,6 +57,8 @@ const SEARCH_DELAY = 140;
 const SELECT_COLUMN_WIDTH = 36;
 const COLUMN_ACTION_WIDTH = 40;
 const PALETTE = ['amber', 'red', 'green', 'sky', 'violet', 'rose', 'orange', 'neutral'] as const;
+const RATING_VALUES = ['1', '2', '3', '4', '5'] as const;
+const GRID_CONTROLS = '.zb-link-control, .zb-url-edit, [data-rating]';
 
 function defaultColumnWidth(column: Column): number {
   return isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column].defaultWidth : 140;
@@ -68,6 +73,9 @@ const PROPERTY_TYPES: readonly PropertyType[] = [
   'checkbox',
   'single-select',
   'multi-select',
+  'rating',
+  'url',
+  'date',
 ];
 const words = {
   views: ['Views', '视图'],
@@ -102,6 +110,8 @@ const words = {
   moveLeft: ['Move left', '向左移动'],
   moveRight: ['Move right', '向右移动'],
   resetOrder: ['Restore default column order', '恢复默认列序'],
+  freezeThrough: ['Freeze through this column', '冻结到此列'],
+  unfreezeColumns: ['Unfreeze columns', '取消冻结'],
   resetWidth: ['Restore default width', '恢复默认列宽'],
   hideColumn: ['Hide this column', '隐藏此列'],
   columnMenu: ['Column actions', '列操作'],
@@ -194,6 +204,15 @@ const words = {
   checkbox: ['Checkbox', '复选框'],
   'single-select': ['Single-select', '单选'],
   'multi-select': ['Multi-select', '多选'],
+  rating: ['Rating', '评分'],
+  url: ['URL', '链接'],
+  date: ['Date', '日期'],
+  clearRating: ['Clear rating', '清空评分'],
+  previousMonth: ['Previous month', '上个月'],
+  nextMonth: ['Next month', '下个月'],
+  today: ['Today', '今天'],
+  invalidDate: ['Enter a valid date in YYYY-MM-DD format.', '请输入有效的日期（YYYY-MM-DD）。'],
+  invalidURL: ['Enter a valid HTTP or HTTPS link.', '请输入有效的 HTTP 或 HTTPS 链接。'],
   yes: ['Yes', '是'],
   no: ['No', '否'],
   clear: ['Clear', '清空'],
@@ -231,8 +250,8 @@ const words = {
   noItems: ['No matching items', '没有匹配条目'],
   noColumns: ['No visible columns. Choose columns above.', '没有可见列，请在上方选择要显示的列。'],
   keyboardHint: [
-    'hjkl / arrows Move · Enter Edit / open · x Select · o Open PDF · / Search',
-    'hjkl／方向键 移动 · Enter 编辑／打开 · x 勾选 · o 打开 PDF · / 搜索',
+    'hjkl / arrows Move · Enter Edit / open · 1–5 / 0 Rate / clear · x Select · o Open PDF · / Search',
+    'hjkl／方向键 移动 · Enter 编辑／打开 · 1–5／0 评分／清空 · x 勾选 · o 打开 PDF · / 搜索',
   ],
   loadError: ['Items could not be loaded.', '无法加载条目。'],
   retry: ['Retry', '重试'],
@@ -346,12 +365,14 @@ function mountWorkspaceSurface(
   const tableKeys = new TableKeys();
   let entries: readonly VirtualRow[] = [];
   const mounted = new Map<string, HTMLTableRowElement>();
+  let frozen: FrozenColumns = { count: 0, width: 0, offsets: [] };
   let tableBody:
     | {
         body: HTMLTableSectionElement;
         leading: HTMLTableRowElement;
         trailing: HTMLTableRowElement;
         columns: readonly Column[];
+        headers: HTMLCollectionOf<HTMLTableCellElement>;
       }
     | undefined;
   let activeCell = restored?.activeCell;
@@ -371,6 +392,7 @@ function mountWorkspaceSurface(
   let recycleEditor: (() => void) | undefined;
   let editorKey: ((event: KeyboardEvent) => boolean) | undefined;
   let updateEditorColors: (() => void) | undefined;
+  let positionEditor: (() => void) | undefined;
   const keyTarget: EventTarget = window ?? root;
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
@@ -383,6 +405,7 @@ function mountWorkspaceSurface(
     toggle(row, property, checked) {
       saveCell(host.setProperty(row.id, property.key, checked ? true : null));
     },
+    rate: rateRow,
     edit(row, column, property, value, cell, opener) {
       if (column === 'tags') editTags(row, cell, opener);
       else if (property && isSelectProperty(property.type))
@@ -706,7 +729,10 @@ function mountWorkspaceSurface(
   search.addEventListener('input', queueSearch);
   // Run before Zotero and other add-ons' document handlers, but only consume our keys.
   keyTarget.addEventListener('keydown', captureKeys as EventListener, true);
-  tableWrap.addEventListener('scroll', scheduleWindow);
+  tableWrap.addEventListener('scroll', () => {
+    updateFrozenShadow();
+    scheduleWindow();
+  });
   tableWrap.addEventListener('focusin', gridFocus);
   tableWrap.addEventListener('focusout', (event) => {
     if (event.relatedTarget && !tableWrap.contains(event.relatedTarget as Node)) {
@@ -719,6 +745,7 @@ function mountWorkspaceSurface(
     window?.ResizeObserver &&
     new window.ResizeObserver((changes) => {
       if (changes.some(({ target }) => target === rowProbe)) rowGeometryDirty = true;
+      updateFrozenColumns();
       scheduleWindow();
     });
   resizeObserver?.observe(tableWrap);
@@ -841,7 +868,13 @@ function mountWorkspaceSurface(
       return;
     }
     if (!composingSearch && popovers.consumeEscape(event)) return;
-    if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (
+      !event.isComposing &&
+      event.keyCode !== 229 &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
       if (event.key === ' ' && target.closest('button, input, select, textarea')) {
         event.stopPropagation();
         return;
@@ -1017,6 +1050,7 @@ function mountWorkspaceSurface(
     }
     if (changedActive || changedDensity) syncDensity();
     if (changedActive || changedWidths) updateTableWidths();
+    else if (previousView.frozenCount !== view.frozenCount) updateFrozenColumns();
     if (changedViews) renderTabs();
     if (changedScope || changedActive) renderScope();
     if (changedProperties) {
@@ -1113,6 +1147,7 @@ function mountWorkspaceSurface(
           sorts: [{ column: 'title', direction: 'asc' }],
           filters: [],
           density: globals.defaultDensity,
+          frozenCount: 1,
         };
     saveViews([...preferences.views, view], id);
   }
@@ -1533,6 +1568,9 @@ function mountWorkspaceSurface(
         visible.length > 1,
       ),
     ];
+    columns.push(action(t('freezeThrough'), () => updateView({ frozenCount: index + 1 })));
+    if (view.frozenCount)
+      columns.push(action(t('unfreezeColumns'), () => updateView({ frozenCount: 0 })));
     const property = propertyFor(column);
     if (property) {
       columns.push(
@@ -1816,6 +1854,13 @@ function mountWorkspaceSurface(
       return select(label, items, value);
     }
     if (column === 'collections') return valuePicker(label, collectionNames(), value);
+    if (type === 'rating') {
+      const items: [string, string][] = [['', t('chooseValue')]];
+      for (const rating of RATING_VALUES) items.push([rating, ratingLabel(rating)]);
+      if (value && !items.some(([id]) => id === value))
+        items.push([value, `${value} (${t('unavailable')})`]);
+      return select(label, items, value);
+    }
     if (property && isSelectProperty(property.type))
       return valuePicker(label, property.options ?? [], value);
     const field = input(label, value);
@@ -2239,6 +2284,16 @@ function mountWorkspaceSurface(
     return form;
   }
 
+  function ratingLabel(value: string): string {
+    return zh ? `${value} 星` : `${value} ${value === '1' ? 'star' : 'stars'}`;
+  }
+
+  function scalarError(type: PropertyType, value: string): string | undefined {
+    if (value && type === 'date' && !isISODate(value)) return t('invalidDate');
+    if (value && type === 'url' && !webURL(value)) return t('invalidURL');
+    return undefined;
+  }
+
   function buildBulkPropertyForm(): [HTMLFormElement, () => void] {
     const form = element('form', 'zb-line');
     const picker = select(t('bulkProperty'), [], '');
@@ -2258,12 +2313,28 @@ function mountWorkspaceSurface(
       const setValue = (value: PropertyValue): void => {
         void runBulk({ kind: 'property', key: property.key, value });
       };
-      if (property.type === 'text' || property.type === 'number') {
+      if (
+        property.type === 'text' ||
+        property.type === 'number' ||
+        property.type === 'url' ||
+        property.type === 'date'
+      ) {
         const field = input(t('bulkValue'));
-        field.placeholder = t('bulkValue');
+        field.placeholder = property.type === 'date' ? 'YYYY-MM-DD' : t('bulkValue');
         field.required = true;
         if (property.type === 'number') field.inputMode = 'decimal';
-        valueForSubmit = () => field.value.trim() || undefined;
+        if (property.type === 'url') field.inputMode = 'url';
+        field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
+        valueForSubmit = () => {
+          const value = field.value.trim();
+          const error = scalarError(property.type, value);
+          if (error) {
+            field.setAttribute('aria-invalid', 'true');
+            showStatus(error, true);
+            return undefined;
+          }
+          return value || undefined;
+        };
         editor.append(field);
       } else if (property.type === 'multi-select') {
         const field = select(
@@ -2282,6 +2353,8 @@ function mountWorkspaceSurface(
       } else {
         const choices: [string, string][] = [['', t('chooseValue')]];
         if (property.type === 'checkbox') choices.push(['true', t('yes')], ['false', t('no')]);
+        else if (property.type === 'rating')
+          for (const rating of RATING_VALUES) choices.push([rating, ratingLabel(rating)]);
         else for (const value of property.options ?? []) choices.push([value, value]);
         const field = select(t('bulkValue'), choices, '');
         field.addEventListener('change', () => {
@@ -2646,10 +2719,11 @@ function mountWorkspaceSurface(
       const leading = spacer();
       const trailing = spacer();
       body.append(leading, trailing);
-      tableBody = { body, leading, trailing, columns };
+      tableBody = { body, leading, trailing, columns, headers: titles.cells };
       table.append(colgroup, header, body);
       updateTableWidths(table);
       tableWrap.replaceChildren(table);
+      updateFrozenColumns();
       if (!items.length) {
         const empty = element('div', 'zb-empty', t('noItems'));
         empty.setAttribute('role', 'status');
@@ -2679,7 +2753,8 @@ function mountWorkspaceSurface(
     headings: readonly HTMLTableCellElement[],
   ): void {
     let drag: { id: number; from: number; x: number; slot: number; sign: number } | undefined;
-    let marker: HTMLTableCellElement | undefined;
+    const marker = element('div', 'zb-column-drop');
+    marker.setAttribute('aria-hidden', 'true');
     let suppressClick = false;
     const target = (event: MouseEvent) =>
       (event.target as Element).closest<HTMLButtonElement>('[data-header-column]');
@@ -2703,22 +2778,52 @@ function mountWorkspaceSurface(
         popovers.close(false);
       }
       const x = event.clientX * sign;
-      const index = headings.findIndex((heading) => {
-        const { left, right } = heading.getBoundingClientRect();
-        return x < (left + right) * 0.5 * sign;
-      });
-      const boundary = index < 0 ? headings.length : index;
+      const viewport = inlineViewport();
+      const inlineStart = viewport.rtl ? -viewport.right : viewport.left;
+      const inlineEnd = viewport.rtl ? -viewport.left : viewport.right;
+      let boundary = headings.length;
+      for (let index = 0; index < headings.length; index++) {
+        const { left, right } = headings[index]!.getBoundingClientRect();
+        const start = sign === 1 ? left : -right;
+        const end = sign === 1 ? right : -left;
+        if (inlineEnd > inlineStart) {
+          const visibleStart = Math.max(
+            start,
+            inlineStart + (index + 1 < frozen.count ? 0 : frozen.width),
+          );
+          const visibleEnd = Math.min(end, inlineEnd);
+          if (visibleStart >= visibleEnd && end <= visibleStart) continue;
+          if (x >= (visibleStart + visibleEnd) / 2) continue;
+        } else if (x >= (start + end) / 2) continue;
+        boundary = index;
+        break;
+      }
       drag.slot = boundary > from ? boundary - 1 : boundary;
-      if (marker) delete marker.dataset.drop;
-      marker = drag.slot === from ? undefined : headings[Math.min(boundary, headings.length - 1)];
-      if (marker) marker.dataset.drop = boundary === headings.length ? 'after' : 'before';
+      if (drag.slot === from) {
+        marker.remove();
+        return;
+      }
+      const heading = headings[Math.min(boundary, headings.length - 1)]!;
+      const { left, right, top, height } = heading.getBoundingClientRect();
+      const after = boundary === headings.length;
+      const edge = sign === 1 ? (after ? right : left) : -(after ? left : right);
+      const visibleEdge =
+        inlineEnd > inlineStart
+          ? Math.max(
+              inlineStart + (boundary + 1 < frozen.count ? 0 : frozen.width),
+              Math.min(edge, inlineEnd),
+            )
+          : edge;
+      marker.style.left = `${visibleEdge * sign}px`;
+      marker.style.top = `${top}px`;
+      marker.style.height = `${height}px`;
+      if (!marker.isConnected) tableWrap.append(marker);
     });
     const finish = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.id) return;
       const { from, slot } = drag;
       drag = undefined;
-      if (marker) delete marker.dataset.drop;
-      marker = undefined;
+      marker.remove();
       if (event.type === 'pointerup' && suppressClick) moveColumn(columns[from]!, slot);
     };
     titles.addEventListener('pointerup', finish);
@@ -2819,6 +2924,7 @@ function mountWorkspaceSurface(
         row.dataset.rowKey = entry.key;
         row.setAttribute('aria-rowindex', String(i + 2));
         mounted.set(entry.key, row);
+        if (entry.kind === 'item' && frozen.count) paintFrozenRow(row, 0);
         added = true;
       }
       if (row.nextSibling !== next) body.insertBefore(row, next);
@@ -2851,6 +2957,7 @@ function mountWorkspaceSurface(
       Math.abs(tableWrap.scrollTop - scroll) > 0.5
     )
       tableWrap.scrollTop = scroll;
+    positionEditor?.();
     paintActiveCell();
     if (added) fitPills();
   }
@@ -2869,13 +2976,13 @@ function mountWorkspaceSurface(
     if (cell !== paintedCell) {
       if (paintedCell) {
         delete paintedCell.dataset.activeCell;
-        for (const link of paintedCell.querySelectorAll<HTMLElement>('.zb-link-control'))
-          link.tabIndex = -1;
+        for (const control of paintedCell.querySelectorAll<HTMLElement>(GRID_CONTROLS))
+          control.tabIndex = -1;
       }
       if (cell) {
         cell.dataset.activeCell = '';
-        for (const link of cell.querySelectorAll<HTMLElement>('.zb-link-control'))
-          link.tabIndex = 0;
+        for (const control of cell.querySelectorAll<HTMLElement>(GRID_CONTROLS))
+          if (!control.matches(':disabled')) control.tabIndex = 0;
       }
       paintedCell = cell;
     }
@@ -2890,14 +2997,70 @@ function mountWorkspaceSurface(
         return;
       restoreGridFocus = false;
       cell.focus({ preventScroll: true });
-      const bounds = cell.getBoundingClientRect();
-      const viewport = tableWrap.getBoundingClientRect();
-      if (!cell.parentElement?.classList.contains('zb-group')) {
-        if (bounds.left < viewport.left) tableWrap.scrollLeft += bounds.left - viewport.left;
-        else if (bounds.right > viewport.right)
-          tableWrap.scrollLeft += bounds.right - viewport.right;
-      }
+      revealGridCell(cell);
     }
+  }
+
+  function inlineViewport(): { left: number; right: number; rtl: boolean } {
+    const rect = tableWrap.getBoundingClientRect();
+    const left = rect.left + tableWrap.clientLeft;
+    return {
+      left,
+      right: tableWrap.clientWidth ? left + tableWrap.clientWidth : rect.right,
+      rtl: window?.getComputedStyle(tableWrap).direction === 'rtl',
+    };
+  }
+
+  function revealGridCell(cell: HTMLTableCellElement): void {
+    if (cell.hasAttribute('data-frozen') || cell.parentElement?.classList.contains('zb-group'))
+      return;
+    const { left, right } = cell.getBoundingClientRect();
+    const viewport = inlineViewport();
+    if (viewport.right <= viewport.left) return;
+    tableWrap.scrollLeft += viewport.rtl
+      ? -horizontalReveal(-right, -left, -viewport.right + frozen.width, -viewport.left)
+      : horizontalReveal(left, right, viewport.left + frozen.width, viewport.right);
+  }
+
+  function updateFrozenShadow(): void {
+    tableWrap.toggleAttribute(
+      'data-frozen-shadow',
+      frozen.count > 0 && Math.abs(tableWrap.scrollLeft) > 0,
+    );
+  }
+
+  function paintFrozenCell(cell: HTMLTableCellElement, index: number): void {
+    const offset = frozen.offsets[index];
+    cell.toggleAttribute('data-frozen', offset !== undefined);
+    cell.toggleAttribute('data-frozen-end', index + 1 === frozen.count);
+    if (offset === undefined) cell.style.removeProperty('--zb-frozen-offset');
+    else cell.style.setProperty('--zb-frozen-offset', `${offset}px`);
+  }
+
+  function paintFrozenRow(row: HTMLTableRowElement, previousCount: number): void {
+    const count = Math.max(previousCount, frozen.count);
+    for (let index = 0; index < count && index < row.cells.length - 1; index++) {
+      paintFrozenCell(row.cells[index]!, index);
+    }
+  }
+
+  function updateFrozenColumns(): void {
+    if (!tableBody) return;
+    const requested = Math.min(activeView().frozenCount ?? 0, tableBody.columns.length);
+    const previous = frozen;
+    const widths: number[] = [];
+    for (let index = 0; requested && index <= requested; index++) {
+      widths.push(tableBody.headers[index]!.getBoundingClientRect().width);
+    }
+    frozen = frozenColumns(widths, requested, tableWrap.clientWidth);
+    const count = Math.max(previous.count, frozen.count);
+    for (let index = 0; index < count && index <= tableBody.columns.length; index++) {
+      paintFrozenCell(tableBody.headers[index]!, index);
+    }
+    for (const row of mounted.values()) {
+      if (!row.classList.contains('zb-group')) paintFrozenRow(row, previous.count);
+    }
+    updateFrozenShadow();
   }
 
   function gridTarget(target: Element): void {
@@ -2969,12 +3132,13 @@ function mountWorkspaceSurface(
       !globals.keyboardFlow ||
       event.defaultPrevented ||
       (target !== tableWrap && !target.closest('tbody tr[data-row-key]')) ||
-      target.closest('.zb-editor')
+      event.keyCode === 229 ||
+      target.closest('input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor')
     )
       return;
     if (
       event.key === 'Enter' &&
-      target.matches('input[type=checkbox], .zb-title-action, .zb-link-control')
+      target.matches(`input[type=checkbox], .zb-title-action, ${GRID_CONTROLS}`)
     )
       return;
     const command = tableKeys.handle(event);
@@ -2997,6 +3161,13 @@ function mountWorkspaceSurface(
     const index = layout.indexOf(current.key);
     const entry = entries[index];
     if (!entry) return false;
+    if (typeof command !== 'string') {
+      if (entry.kind !== 'item' || !entry.row.writable) return false;
+      const property = propertyFor(current.column);
+      if (property?.type !== 'rating') return false;
+      rateRow(entry.row, property, command.rating);
+      return true;
+    }
     const columns = tableBody.columns;
     const columnIndex = columns.indexOf(current.column);
     let destination = index;
@@ -3053,9 +3224,15 @@ function mountWorkspaceSurface(
           setGroupFolded(entry, !entry.folded);
         } else {
           if (!activeNode()) moveGrid(index, column, false);
-          activeNode()
-            ?.querySelector<HTMLElement>('button:not(.zb-link-control), input[type=checkbox]')
-            ?.click();
+          const cell = activeNode();
+          const star =
+            cell?.querySelector<HTMLElement>('[data-rating][aria-pressed="true"]') ??
+            cell?.querySelector<HTMLElement>('[data-rating]');
+          if (star) star.focus({ preventScroll: true });
+          else
+            cell
+              ?.querySelector<HTMLElement>('button:not(.zb-link-control), input[type=checkbox]')
+              ?.click();
         }
         return true;
     }
@@ -3074,6 +3251,7 @@ function mountWorkspaceSurface(
   }
 
   function widthGeometryChanged(): void {
+    updateFrozenColumns();
     resetMeasurements = activeView().density === 'wrap';
     fitPills();
     scheduleWindow();
@@ -3196,7 +3374,8 @@ function mountWorkspaceSurface(
       label = `${t(value ? 'withTag' : 'withoutTag')}: ${group.tag}`;
     else if (group?.column === 'collections') {
       label = `${t(value ? 'inCollection' : 'outsideCollection')}: ${group.collection}`;
-    } else label = typeof value === 'boolean' ? t(value ? 'yes' : 'no') : value;
+    } else if (typeof value === 'boolean') label = t(value ? 'yes' : 'no');
+    else label = group && propertyFor(group.column)?.type === 'rating' ? ratingLabel(value) : value;
     const line = element('tr', 'zb-group');
     const heading = element('td');
     heading.tabIndex = -1;
@@ -3274,18 +3453,33 @@ function mountWorkspaceSurface(
     const controls = element('div', 'zb-editor');
     cell.append(controls);
     opener.classList.add('zb-editor-opener');
-    if (tableWrap.clientHeight) {
+    positionEditor = () => {
+      if (!tableWrap.clientWidth || !tableWrap.clientHeight) return;
+      const viewport = inlineViewport();
+      const outer = tableWrap.getBoundingClientRect();
+      const minX = viewport.left + 2;
+      const maxX = viewport.right - 2;
+      const minY = outer.top + tableWrap.clientTop + 2;
+      const maxY = minY + tableWrap.clientHeight - 4;
+      controls.style.setProperty('--zb-editor-width', `${Math.max(0, maxX - minX)}px`);
+      controls.style.setProperty('--zb-editor-height', `${Math.max(0, maxY - minY)}px`);
       const bounds = cell.getBoundingClientRect();
-      const viewport = tableWrap.getBoundingClientRect();
-      controls.toggleAttribute('data-above', viewport.bottom - bounds.bottom < 150);
-      controls.toggleAttribute('data-end', viewport.right - bounds.left < 300);
-    }
+      const { width, height } = controls.getBoundingClientRect();
+      const x = viewport.rtl ? bounds.right - width : bounds.left;
+      const y = bounds.top + height <= maxY ? bounds.top + 1 : bounds.bottom - height - 1;
+      controls.style.left = `${Math.max(minX, Math.min(x, maxX - width))}px`;
+      controls.style.top = `${Math.max(minY, Math.min(y, maxY - height))}px`;
+    };
+    queueMicrotask(() => {
+      if (closeEditor === close) positionEditor?.();
+    });
     function close(restore: boolean): void {
       if (closeEditor !== close) return;
       closeEditor = undefined;
       recycleEditor = undefined;
       editorKey = undefined;
       updateEditorColors = undefined;
+      positionEditor = undefined;
       controls.remove();
       opener.classList.remove('zb-editor-opener');
       if (restore) cell.focus({ preventScroll: true });
@@ -3312,6 +3506,10 @@ function mountWorkspaceSurface(
     });
   }
 
+  function rateRow(row: Row, property: Property, value: string | null): void {
+    saveCell(host.setProperty(row.id, property.key, value));
+  }
+
   function editScalar(
     row: Row,
     property: Property,
@@ -3322,33 +3520,72 @@ function mountWorkspaceSurface(
     const { controls, close } = beginEditor(cell, opener);
     const field = input(scopedName(t('edit'), property.key), current);
     if (property.type === 'number') field.inputMode = 'decimal';
+    if (property.type === 'url') field.inputMode = 'url';
+    const isDate = property.type === 'date';
     const save = (value: string, restore: boolean): void => {
       if (closeEditor !== close) return;
+      const error = scalarError(property.type, value.trim());
+      if (error) {
+        showStatus(error, true);
+        if (restore) {
+          field.setAttribute('aria-invalid', 'true');
+          return;
+        }
+        close(false);
+        return;
+      }
       close(restore);
       const next = value.trim();
       if (next !== current) saveCell(host.setProperty(row.id, property.key, next || null));
     };
-    recycleEditor = () => save(field.value, false);
-    const clear = button(
-      t('clear'),
-      () => save('', true),
-      '',
-      scopedName(t('clear'), property.key),
-    );
-    clear.addEventListener('mousedown', (event) => event.preventDefault());
+    if (!isDate) recycleEditor = () => save(field.value, false);
     const line = element('div', 'zb-line');
-    line.append(field, clear);
-    controls.append(line);
+    line.append(field);
+    field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
+    if (isDate) {
+      field.placeholder = 'YYYY-MM-DD';
+      const calendar = createInlineCalendar(doc, {
+        value: current,
+        locale: options.language,
+        labels: {
+          previousMonth: t('previousMonth'),
+          nextMonth: t('nextMonth'),
+          today: t('today'),
+          clear: t('clear'),
+        },
+        onSelect(value) {
+          field.value = value ?? '';
+          field.removeAttribute('aria-invalid');
+          field.focus({ preventScroll: true });
+        },
+      });
+      calendar.element.addEventListener('mousedown', (event) => {
+        if ((event.target as Element).closest('button')) event.preventDefault();
+      });
+      field.addEventListener('input', () => calendar.setValue(field.value.trim()));
+      controls.append(line, calendar.element);
+    } else {
+      const clear = button(
+        t('clear'),
+        () => save('', true),
+        '',
+        scopedName(t('clear'), property.key),
+      );
+      clear.addEventListener('mousedown', (event) => event.preventDefault());
+      line.append(clear);
+      controls.append(line);
+    }
     controls.addEventListener('focusout', (event) => {
-      if (!event.relatedTarget || !controls.contains(event.relatedTarget as Node))
-        save(field.value, false);
+      if (event.relatedTarget && controls.contains(event.relatedTarget as Node)) return;
+      if (isDate) close(false);
+      else save(field.value, false);
     });
     editorKey = (event) => {
       if (event.key !== 'Enter' || event.target !== field) return false;
       save(field.value, true);
       return true;
     };
-    field.focus();
+    field.focus({ preventScroll: true });
     field.select();
   }
 

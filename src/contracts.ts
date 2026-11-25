@@ -1,4 +1,12 @@
-export type PropertyType = 'text' | 'number' | 'checkbox' | 'single-select' | 'multi-select';
+export type PropertyType =
+  | 'text'
+  | 'number'
+  | 'checkbox'
+  | 'single-select'
+  | 'multi-select'
+  | 'rating'
+  | 'url'
+  | 'date';
 export type PropertyValue = string | boolean | readonly string[] | null;
 
 export const OPTION_COLORS = [
@@ -232,6 +240,7 @@ export interface View {
   readonly group?: Grouping;
   readonly density?: Density;
   readonly columnWidths?: Readonly<Partial<Record<Column, number>>>;
+  readonly frozenCount?: number;
 }
 
 export interface Scope {

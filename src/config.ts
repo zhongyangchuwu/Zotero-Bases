@@ -42,6 +42,9 @@ const propertyTypes: Record<PropertyType, true> = {
   text: true,
   number: true,
   checkbox: true,
+  rating: true,
+  url: true,
+  date: true,
   'single-select': true,
   'multi-select': true,
 };
@@ -177,6 +180,12 @@ function view(value: unknown, strict = false): View | undefined {
   const group = grouping(value.group);
   const density = validDensity(value.density) ? value.density : undefined;
   const widths = columnWidths(value.columnWidths);
+  const frozenCount =
+    typeof value.frozenCount === 'number' &&
+    Number.isSafeInteger(value.frozenCount) &&
+    value.frozenCount >= 0
+      ? value.frozenCount
+      : undefined;
   const columns = Array.isArray(value.columns) ? value.columns.filter(column) : DEFAULT_COLUMNS;
   if (
     strict &&
@@ -186,7 +195,8 @@ function view(value: unknown, strict = false): View | undefined {
       !value.filters.every(validFilter) ||
       (value.group !== undefined && !validGrouping(value.group)) ||
       (value.density !== undefined && !density) ||
-      (value.columnWidths !== undefined && !widths))
+      (value.columnWidths !== undefined && !widths) ||
+      (value.frozenCount !== undefined && frozenCount === undefined))
   )
     return undefined;
   return {
@@ -206,6 +216,7 @@ function view(value: unknown, strict = false): View | undefined {
     ...(group ? { group } : {}),
     ...(density ? { density } : {}),
     ...(widths ? { columnWidths: widths } : {}),
+    ...(frozenCount !== undefined ? { frozenCount } : {}),
   };
 }
 

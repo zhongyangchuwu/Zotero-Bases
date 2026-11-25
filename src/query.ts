@@ -15,8 +15,9 @@ import {
   type View,
 } from './contracts';
 import { isDecimal, readProperty } from './extra';
+import { isGregorianDay, isISODate, isRating } from './property-values';
 
-type Kind = PropertyType | 'multi' | 'date';
+type Kind = PropertyType | 'multi' | 'native-date';
 type ValueSource = NativeColumn | Property;
 
 interface ColumnInfo {
@@ -30,14 +31,18 @@ export interface QueryResult {
   readonly invalid: readonly number[];
 }
 
+const DATE_OPERATORS: readonly Operator[] = ['equals', 'before', 'after', 'has', 'missing'];
 const OPERATORS: Readonly<Record<Kind, readonly Operator[]>> = {
   text: ['contains', 'equals', 'has', 'missing'],
   number: ['equals', 'gte', 'lte', 'has', 'missing'],
+  rating: ['equals', 'notEquals', 'gte', 'lte', 'has', 'missing'],
+  url: ['contains', 'notContains', 'has', 'missing'],
   checkbox: ['equals', 'has', 'missing'],
   'single-select': ['equals', 'has', 'missing'],
   'multi-select': ['contains', 'has', 'missing'],
   multi: ['contains', 'notContains', 'has', 'missing'],
-  date: ['equals', 'before', 'after', 'has', 'missing'],
+  date: DATE_OPERATORS,
+  'native-date': DATE_OPERATORS,
 };
 const NATIVE_NUMERIC_OPERATORS: readonly Operator[] = [
   'equals',
@@ -52,7 +57,7 @@ const NATIVE_NUMERIC_OPERATORS: readonly Operator[] = [
 const NATIVE_KINDS: Readonly<Record<NativeValueType, Kind>> = {
   text: 'text',
   number: 'number',
-  date: 'date',
+  date: 'native-date',
   link: 'text',
   multi: 'multi',
   boolean: 'checkbox',
@@ -125,7 +130,6 @@ function compareDecimal(left: Decimal, right: Decimal): number {
   return left.digits < right.digits ? -left.sign : left.sign;
 }
 
-const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const DATE_PARTS = /^(\d{4})-(\d{2})(?:-(\d{2})(.*))?$/;
 const DATE_TIME =
   /^[ T]((?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?)(Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?$/i;
@@ -149,8 +153,7 @@ function normalizeDate(value: string, precision: 'month' | 'day' | 'instant'): s
 
   const day = Number(parts[3] ?? '00');
   if (!day) return precision === 'month' && !time ? text.slice(0, 7) : undefined;
-  const leapDay = month === 2 && year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  if (day > (leapDay ? 29 : DAYS_IN_MONTH[month - 1]!)) return undefined;
+  if (!isGregorianDay(year, month, day)) return undefined;
   if (precision === 'month') return text.slice(0, 7);
   const calendarDay = text.slice(0, 10);
   // Zotero SQL times have no explicit offset; compare them as UTC, not machine-local time.
@@ -188,10 +191,12 @@ function compileFilter(
       if (value !== 'true' && value !== 'false') return undefined;
       return (actual) => actual === (value === 'true');
     case 'date':
-      if (!value || dateDay(value) !== value) return undefined;
+    case 'native-date': {
+      const custom = info.kind === 'date';
+      if (custom ? !isISODate(value) : dateDay(value) !== value) return undefined;
       return (actual) => {
         if (typeof actual !== 'string') return false;
-        const day = dateDay(actual);
+        const day = custom ? actual : dateDay(actual);
         return (
           day !== undefined &&
           (operator === 'equals'
@@ -201,6 +206,26 @@ function compileFilter(
               : day > value)
         );
       };
+    }
+    case 'rating': {
+      if (!isRating(value)) return undefined;
+      const target = Number(value);
+      return (actual) => {
+        if (typeof actual !== 'string') return false;
+        const rating = Number(actual);
+        switch (operator) {
+          case 'equals':
+            return rating === target;
+          case 'notEquals':
+            return rating !== target;
+          case 'gte':
+            return rating >= target;
+          case 'lte':
+            return rating <= target;
+        }
+        return false;
+      };
+    }
     case 'number': {
       const target = decimal(value.trim());
       if (target === null) return undefined;
@@ -225,13 +250,15 @@ function compileFilter(
         return false;
       };
     }
+    case 'url':
     case 'text': {
       const target = value.trim().normalize('NFC').toLocaleLowerCase(locale);
       if (!target) return undefined;
       return (actual) => {
         if (typeof actual !== 'string') return false;
         const text = actual.normalize('NFC').toLocaleLowerCase(locale);
-        return operator === 'contains' ? text.includes(target) : text === target;
+        if (operator === 'equals') return text === target;
+        return text.includes(target) === (operator === 'contains');
       };
     }
     case 'single-select':
@@ -257,8 +284,9 @@ function sortKey(value: PropertyValue, kind: Kind): SortKey {
   if (typeof value !== 'string') return value.length ? value.join('; ') : null;
   if (!value) return null;
   if (kind === 'number') return decimal(value);
-  if (kind === 'date') {
-    const normalized = normalizeDate(value, 'instant');
+  if (kind === 'rating') return Number(value);
+  if (kind === 'date' || kind === 'native-date') {
+    const normalized = kind === 'date' ? value : normalizeDate(value, 'instant');
     if (!normalized) return null;
     const timestamp = Date.parse(normalized);
     return Number.isFinite(timestamp) ? timestamp : null;
@@ -302,6 +330,10 @@ function compileSearch(
   for (const column of searchable) {
     const source = isNativeColumn(column) ? column : propertyIn(column, properties);
     if (source) sources.push(source);
+  }
+  for (const property of properties) {
+    if (property.type === 'url' && !searchable.has(`property:${property.key}`))
+      sources.push(property);
   }
   const chinese = locale.toLowerCase().startsWith('zh');
   let remaining = 0;

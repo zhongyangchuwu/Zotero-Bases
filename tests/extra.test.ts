@@ -11,6 +11,9 @@ const methods: Property = {
   type: 'multi-select',
   options: ['Transformer', 'Diffusion'],
 };
+const rating: Property = { key: 'Stars', type: 'rating' };
+const url: Property = { key: 'Project Link', type: 'url' };
+const date: Property = { key: 'Read On', type: 'date' };
 
 describe('property definitions', () => {
   it.each([
@@ -103,6 +106,18 @@ describe('Extra property values', () => {
     [checked, true, 'Reviewed: true', true],
     [stage, ' Reading ', 'Status: Reading', 'Reading'],
     [
+      url,
+      '  https://Example.org/code?q=paper#section  ',
+      'Project Link: https://Example.org/code?q=paper#section',
+      'https://Example.org/code?q=paper#section',
+    ],
+    [url, 'http://example.org', 'Project Link: http://example.org', 'http://example.org'],
+    [rating, '1', 'Stars: 1', '1'],
+    [rating, '5', 'Stars: 5', '5'],
+    [date, '0000-02-29', 'Read On: 0000-02-29', '0000-02-29'],
+    [date, '2000-02-29', 'Read On: 2000-02-29', '2000-02-29'],
+    [date, '9999-12-31', 'Read On: 9999-12-31', '9999-12-31'],
+    [
       methods,
       [' Diffusion ', 'Transformer', 'Diffusion'],
       'Method: Diffusion; Transformer',
@@ -142,6 +157,63 @@ describe('Extra property values', () => {
       expect(() => writeProperty('', score, value)).toThrow(/finite decimal/);
     },
   );
+
+  it.each(['', '0', '6', '1.0', '+3', '03', '3e0', '３'])(
+    'rejects noncanonical rating %j',
+    (value) => {
+      expect(readProperty(`Stars: ${value}`, rating)).toBeNull();
+      expect(() => writeProperty('', rating, value)).toThrow(/whole rating/);
+    },
+  );
+
+  it.each([
+    'javascript:alert(1)',
+    'ftp://example.org',
+    '//example.org',
+    'https:example.org',
+    'https:///example.org',
+    'https://user:pass@example.org',
+    'https://example.org\\path',
+    'https://[invalid]',
+  ])('rejects non-web or malformed URL %s', (value) => {
+    expect(readProperty(`Project Link: ${value}`, url)).toBeNull();
+    expect(() => writeProperty('', url, value)).toThrow(/HTTP or HTTPS/);
+  });
+
+  it.each([
+    '1900-02-29',
+    '2024-02-30',
+    '2024-04-31',
+    '2024-00-10',
+    '2024-13-10',
+    '2024-02-00',
+    '2024-2-09',
+    '2024-02',
+    '2024-02-29T00:00:00Z',
+    '2024-02-29 leap day',
+  ])('rejects a noncanonical or impossible calendar date %s', (value) => {
+    expect(readProperty(`Read On: ${value}`, date)).toBeNull();
+    expect(() => writeProperty('', date, value)).toThrow(/YYYY-MM-DD/);
+  });
+
+  it.each([
+    { property: rating, value: '4' },
+    { property: url, value: 'https://example.org/code' },
+    { property: date, value: '2024-02-29' },
+  ])('edits only the matching Extra lines for $property.type', ({ property, value }) => {
+    const { key } = property;
+    const extra = `DOI: keep\r\n${key}: ${value}\n${key}-notes: keep\u2028${key.toUpperCase()}: invalid\rOther: keep`;
+    expect(readProperty(extra, property)).toBeNull();
+    expect(writeProperty(extra, property, value)).toBe(
+      `DOI: keep\r\n${key}-notes: keep\u2028${key}: ${value}\rOther: keep`,
+    );
+    expect(writeProperty(extra, property, null)).toBe(
+      `DOI: keep\r\n${key}-notes: keep\u2028Other: keep`,
+    );
+    expect(() => writeProperty(extra, property, `${value}\nDOI: changed`)).toThrow();
+    expect(() => writeProperty(extra, property, true)).toThrow();
+    expect(() => writeProperty(extra, { ...property, key: 'DOI' }, null)).toThrow(/reserved/);
+  });
 
   it('clears false and empty values without storing placeholders, and refuses line injection', () => {
     expect(writeProperty('Reviewed: true', checked, false)).toBe('');

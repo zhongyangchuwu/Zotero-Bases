@@ -129,6 +129,7 @@ describe('Zotero Bases configuration', () => {
       ...secondView,
       density: 'wrap',
       columnWidths: { title: 48, 'property:Removed': 1600 },
+      frozenCount: Number.MAX_SAFE_INTEGER,
     };
     config.writeViews({ views: [presented], active: presented.id });
     expect(JSON.parse(raw.get(VIEWS_PREF)!)).toEqual({
@@ -171,6 +172,31 @@ describe('Zotero Bases configuration', () => {
         presentation.density === 'spacious' ? { title: 100 } : undefined,
       );
       expect(decodeSyncSnapshot({ schema: [], views: [saved] }, validateProperty)).toBeUndefined();
+    }
+  });
+
+  it('keeps frozenCount optional locally and rejects malformed portable counts', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const unfrozen = { ...secondView, id: 'unfrozen', frozenCount: 0 };
+    const views = [secondView, unfrozen];
+    config.writeViews({ views, active: unfrozen.id });
+    expect(config.settings().views).toEqual(views);
+    expect(JSON.parse(raw.get(VIEWS_PREF)!).views).toEqual(views);
+    expect(decodeSyncSnapshot({ schema: [], views }, validateProperty)?.views).toEqual(views);
+
+    for (const frozenCount of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1', true, null, {}]) {
+      const malformed = { ...unfrozen, frozenCount };
+      raw.set(VIEWS_PREF, JSON.stringify({ views: [secondView, malformed], active: unfrozen.id }));
+      const { frozenCount: _frozenCount, ...withoutCount } = unfrozen;
+      expect(config.settings()).toEqual({
+        properties: [],
+        views: [secondView, withoutCount],
+        active: unfrozen.id,
+      });
+      expect(
+        decodeSyncSnapshot({ schema: [], views: [secondView, malformed] }, validateProperty),
+      ).toBeUndefined();
     }
   });
 
