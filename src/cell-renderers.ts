@@ -4,6 +4,7 @@ import {
   type Column,
   type NativeColumn,
   type NativeValueType,
+  type OptionColorKey,
   type Property,
   type PropertyType,
   type PropertyValue,
@@ -11,9 +12,11 @@ import {
 } from './contracts';
 import type { GlobalPreferences } from './global-preferences';
 import { dateDay } from './query';
+import { createAttachmentIcon, createItemTypeIcon } from './semantic-icons';
 
 export interface CellActions {
-  open(row: Row, pdf: boolean): void;
+  open(row: Row, target: boolean | 'attachment'): void;
+  tagColor?: (row: Row, name: string) => { native?: string; tone?: OptionColorKey } | undefined;
   linkActions?: { open(url: string): void; copy(text: string): void };
   authorFormat?: () => GlobalPreferences['authorFormat'];
   toggle(row: Row, property: Property, checked: boolean): void;
@@ -33,6 +36,7 @@ export interface CellActions {
       | 'locate'
       | 'open'
       | 'openPDF'
+      | 'openAttachment'
       | 'openLink'
       | 'copyDOI'
       | 'readOnly'
@@ -59,8 +63,10 @@ interface PillFit {
 }
 
 const CHOICE_TONES = ['sky', 'violet', 'teal', 'rose'] as const;
+const NATIVE_TAG_COLOR = '--zb-native-tag-color';
+const HEX_COLOR = /^#[\da-f]{6}$/iu;
 
-function choiceTone(value: string): string {
+function choiceTone(value: string): OptionColorKey {
   const key = value.normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
   switch (key) {
     case 'done':
@@ -87,6 +93,14 @@ function choiceTone(value: string): string {
   let hash = 0;
   for (let i = 0; i < key.length; i++) hash = Math.imul(hash, 31) + key.charCodeAt(i);
   return CHOICE_TONES[(hash >>> 0) % CHOICE_TONES.length]!;
+}
+
+export function optionTone(property: Property, label: string): OptionColorKey {
+  const colors = property.optionColors;
+  return (
+    (colors && Object.prototype.hasOwnProperty.call(colors, label) ? colors[label] : undefined) ??
+    choiceTone(label)
+  );
 }
 
 function fitPills(table: HTMLTableElement): void {
@@ -283,12 +297,49 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       content.textContent = fullText;
       return;
     }
-    const strip = pillStrip(pills, property);
+    const strip = pillStrip(context, pills, property);
     if (!row.writable) strip.title = `${fullText} · ${cell.title}`;
     content.append(strip);
   }
 
+  function paintPillColor(
+    row: Row,
+    column: Column,
+    property: Property | undefined,
+    pill: HTMLElement,
+    label: string,
+  ): void {
+    let tone: OptionColorKey | undefined;
+    if (column === 'tags') {
+      const tagColor = actions.tagColor?.(row, label);
+      if (tagColor?.native && HEX_COLOR.test(tagColor.native)) {
+        pill.style.setProperty(NATIVE_TAG_COLOR, tagColor.native);
+      } else {
+        if (pill.style.length) pill.style.removeProperty(NATIVE_TAG_COLOR);
+        tone = tagColor?.tone;
+      }
+    } else if (property) {
+      tone = optionTone(property, label);
+    }
+    if (tone) pill.dataset.tone = tone;
+    else delete pill.dataset.tone;
+  }
+
+  function paintColors(
+    row: Row,
+    column: Column,
+    property: Property | undefined,
+    cell: HTMLTableCellElement,
+  ): void {
+    for (const pill of cell.querySelectorAll<HTMLElement>(
+      '.zb-cell-pill:not(.zb-cell-pill-more)',
+    )) {
+      paintPillColor(row, column, property, pill, pill.textContent ?? '');
+    }
+  }
+
   function pillStrip(
+    { row, column }: Cell,
     pills: readonly string[],
     property?: Property,
     fullTitle?: string,
@@ -298,13 +349,7 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     for (const label of pills) {
       const pill = element('span', 'zb-cell-pill', label);
       if (fullTitle) pill.title = label;
-      if (property) {
-        const colors = property.optionColors;
-        pill.dataset.tone =
-          (colors && Object.prototype.hasOwnProperty.call(colors, label)
-            ? colors[label]
-            : undefined) ?? choiceTone(label);
-      }
+      if (property || column === 'tags') paintPillColor(row, column, property, pill, label);
       strip.append(pill);
     }
     const more = element('span', 'zb-cell-pill zb-cell-pill-more');
@@ -350,20 +395,33 @@ export function createCellRenderers(document: Document, actions: CellActions) {
           : valueText(full);
       cell.title = full;
     },
-    type({ cell, value }) {
-      if (typeof value === 'string' && value) cell.append(element('span', 'zb-type-badge', value));
-      else cell.textContent = valueText(value);
-      if (typeof value === 'string') cell.title = value;
+    type(context) {
+      const { cell, row, value } = context;
+      if (typeof value !== 'string' || !value) return plain(context);
+      const badge = element('span', 'zb-type-badge');
+      if (row.itemType) {
+        badge.dataset.itemType = row.itemType;
+        badge.append(createItemTypeIcon(document, row.itemType));
+      }
+      badge.append(element('span', 'zb-type-label', value));
+      cell.append(badge);
+      cell.title = value;
     },
     tags: editList,
     pdf(context) {
-      if (context.value !== true) return;
-      const pdf = button(context, () => actions.open(context.row, true), 'zb-pdf-button');
-      named(pdf, `${actions.text('openPDF')} · ${rowName(context.row)}`);
-      const mark = element('span', 'zb-pdf-mark');
-      mark.setAttribute('aria-hidden', 'true');
-      pdf.append(mark);
-      context.cell.append(pdf);
+      const { row, cell } = context;
+      const attachment = row.attachment ?? (row.pdf ? 'pdf' : undefined);
+      if (!attachment) return;
+      const opener = button(
+        context,
+        () => actions.open(row, row.attachment ? 'attachment' : true),
+        'zb-attachment-button',
+      );
+      opener.dataset.attachment = attachment;
+      const label = actions.text(attachment === 'pdf' ? 'openPDF' : 'openAttachment');
+      named(opener, `${label} · ${rowName(row)}`);
+      opener.append(createAttachmentIcon(document, attachment));
+      cell.append(opener);
     },
   };
 
@@ -381,10 +439,11 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     cell.title = value;
   }
 
-  function nativeList({ cell, value }: Cell): void {
+  function nativeList(context: Cell): void {
+    const { cell, value } = context;
     if (value === null || typeof value !== 'object' || !value.length) return;
     cell.classList.add('zb-cell-collections');
-    cell.append(pillStrip(value, undefined, value.join('; ')));
+    cell.append(pillStrip(context, value, undefined, value.join('; ')));
   }
 
   function linkButton(
@@ -480,5 +539,5 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     return cell;
   }
 
-  return { render, fitPills };
+  return { render, fitPills, paintColors };
 }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createConfig, decodeSyncSnapshot, SCHEMA_PREF, VIEWS_PREF } from '../src/config';
+import {
+  createConfig,
+  decodeSyncSnapshot,
+  SCHEMA_PREF,
+  TAG_COLORS_PREF,
+  VIEWS_PREF,
+} from '../src/config';
 import type { Prefs } from '../src/data';
 import { DEFAULT_COLUMNS } from '../src/contracts';
 import type { View } from '../src/contracts';
@@ -326,6 +332,59 @@ describe('Zotero Bases configuration', () => {
     expect(config.settings().active).toBe(secondView.id);
   });
 
+  it('keeps exact and prefix rules in a separate pref, NFC-normalized and case-sensitive', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    expect(config.settings().tagColors).toBeUndefined();
+    config.setTagColor({
+      kind: 'set-tag-color',
+      target: 'tag',
+      name: ' Cafe\u0301 ',
+      color: 'red',
+    });
+    config.setTagColor({ kind: 'set-tag-color', target: 'prefix', name: 'Café', color: 'orange' });
+    config.setTagColor({ kind: 'set-tag-color', target: 'tag', name: 'café', color: 'teal' });
+    config.setTagColor({ kind: 'set-tag-color', target: 'tag', name: 'Café', color: 'green' });
+    const rules = [
+      { kind: 'tag', name: 'Café', color: 'green' },
+      { kind: 'prefix', name: 'Café', color: 'orange' },
+      { kind: 'tag', name: 'café', color: 'teal' },
+    ];
+    expect([...raw.keys()]).toEqual([VIEWS_PREF, TAG_COLORS_PREF]);
+    expect(JSON.parse(raw.get(TAG_COLORS_PREF)!)).toEqual(rules);
+    expect(createConfig(prefs, () => 'all', validateProperty).settings().tagColors).toEqual(rules);
+
+    const snapshot = { schema: [], views: [secondView] };
+    const remote = decodeSyncSnapshot({ ...snapshot, tagColors: [] }, validateProperty)!;
+    expect(remote).toEqual(snapshot);
+    config.applySync(remote);
+    expect(config.settings().tagColors).toEqual(rules);
+
+    config.setTagColor({
+      kind: 'set-tag-color',
+      target: 'tag',
+      name: 'Cafe\u0301',
+      color: undefined,
+    });
+    expect(config.settings().tagColors).toEqual(rules.slice(1));
+  });
+
+  it('ignores a malformed tag-color pref without overwriting it on read', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const malformed = JSON.stringify([
+      { kind: 'prefix', name: 'topic:', color: 'green' },
+      { kind: 'tag', name: 'Café', color: 'sky' },
+      { kind: 'tag', name: ' Cafe\u0301 ', color: 'red' },
+    ]);
+    raw.set(TAG_COLORS_PREF, malformed);
+    expect(config.settings().tagColors).toBeUndefined();
+    expect(() =>
+      config.setTagColor({ kind: 'set-tag-color', target: 'tag', name: ' \t ', color: 'red' }),
+    ).toThrow('Invalid tag color rule');
+    expect(raw.get(TAG_COLORS_PREF)).toBe(malformed);
+  });
+
   it('rejects a remote snapshot as a unit for invalid or duplicate definitions or view configuration', () => {
     const decode = (input: unknown) => decodeSyncSnapshot(input, validateProperty);
     const text = { key: 'Stage', type: 'text' };
@@ -351,7 +410,7 @@ describe('Zotero Bases configuration', () => {
       [],
       null,
       'green',
-      { Read: 'orange' },
+      { Read: 'ultraviolet' },
       { Read: ['green'] },
       { Unknown: 'green' },
       { Café: 'amber', 'Cafe\u0301': 'sky' },

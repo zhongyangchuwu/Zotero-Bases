@@ -268,22 +268,30 @@ export const workspaceCSS = String.raw`
   color: var(--zb-muted);
   font-variant-numeric: tabular-nums;
 }
-.zb-workspace .zb-option-palette { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-.zb-workspace .zb-option-palette .zb-option-swatch {
-  display: grid;
+.zb-workspace .zb-option-palette { display: flex; flex-wrap: wrap; gap: 0.25em; }
+.zb-workspace .zb-option-swatch {
+  display: inline-grid;
   place-items: center;
-  width: 1.35rem;
-  min-height: 1.35rem;
+  width: 1.7em;
+  min-height: 1.7em;
   padding: 0;
   border-radius: 4px;
   line-height: 1;
 }
-.zb-workspace .zb-option-palette .zb-option-swatch[data-tone] {
-  background: var(--zb-choice-tone, var(--zb-pill-bg));
+.zb-workspace :is(.zb-option-swatch, .zb-color-control)[data-tone]::before {
+  content: '';
+  width: 0.72em;
+  height: 0.72em;
+  border-radius: 50%;
+  background: var(--zb-choice-tone);
+  flex: none;
 }
-.zb-workspace .zb-option-palette .zb-option-swatch:is(:hover, [aria-pressed='true']) {
+.zb-workspace .zb-option-swatch:is(:hover, [aria-pressed='true'], [aria-expanded='true']) {
   border-color: var(--zb-accent);
 }
+.zb-workspace .zb-color-control { display: inline-flex; align-items: center; gap: 0.45em; }
+.zb-workspace .zb-editor-choice { display: inline-flex; align-items: center; gap: 0.18em; }
+.zb-workspace .zb-choice-palette:not([hidden]) { margin-block: 0.35em; }
 .zb-workspace .zb-property { border-block-start: 1px solid var(--zb-border); padding-block: 0.45rem 0; }
 .zb-workspace .zb-property + .zb-property { margin-block-start: 0.45rem; }
 .zb-workspace .zb-property > .zb-line { margin-block: 0.25rem; }
@@ -350,6 +358,33 @@ export const workspaceCSS = String.raw`
   touch-action: pan-y;
 }
 .zb-workspace .zb-field-icon, .zb-workspace .zb-sort-indicator { flex: none; color: var(--zb-muted); }
+.zb-workspace .zb-native-icon {
+  display: inline-block;
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+  background: var(--zb-icon-light) center / contain no-repeat;
+  fill: currentColor;
+  -moz-context-properties: fill, fill-opacity;
+}
+@media (prefers-color-scheme: dark) {
+  .zb-workspace .zb-native-icon {
+    background-image: var(--zb-icon-dark, var(--zb-icon-light));
+  }
+}
+.zb-workspace .zb-field-icon.zb-native-icon { width: 1em; height: 1em; }
+.zb-workspace [data-header-column='notesCount'] .zb-native-icon {
+  color: light-dark(#8b6100, #ffc46b);
+}
+.zb-workspace [data-header-column='attachmentsCount'] .zb-native-icon {
+  color: light-dark(#16774f, #6ed6a4);
+}
+.zb-workspace [data-header-column='tags'] .zb-native-icon {
+  color: light-dark(#ab4f1e, #ffab72);
+}
+.zb-workspace :is([data-header-column='doi'], [data-header-column='url']) .zb-native-icon {
+  color: light-dark(#2865a2, #91c9ff);
+}
 .zb-workspace .zb-header-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .zb-workspace th[data-drop='before']::before, .zb-workspace th[data-drop='after']::before {
   content: '';
@@ -569,38 +604,44 @@ export const workspaceCSS = String.raw`
   background: color-mix(in srgb, var(--zb-pill-bg) 70%, transparent);
   color: var(--zb-muted);
 }
-.zb-workspace .zb-type-badge { color: var(--zb-muted); }
-.zb-workspace [data-tone='green'] { --zb-choice-tone: #23935d; }
-.zb-workspace [data-tone='amber'] { --zb-choice-tone: #d28b14; }
-.zb-workspace [data-tone='sky'] { --zb-choice-tone: #438be0; }
-.zb-workspace [data-tone='violet'] { --zb-choice-tone: #8a70c9; }
-.zb-workspace [data-tone='teal'] { --zb-choice-tone: #269a96; }
-.zb-workspace [data-tone='rose'] { --zb-choice-tone: #be6286; }
-.zb-workspace .zb-cell-pill[data-tone]:not([data-tone='neutral']) {
-  background: color-mix(in srgb, var(--zb-surface) 76%, var(--zb-choice-tone));
-  border-color: color-mix(in srgb, var(--zb-surface) 58%, var(--zb-choice-tone));
-  color: color-mix(in srgb, var(--zb-text) 87%, var(--zb-choice-tone));
+.zb-workspace [data-tone='amber'] { --zb-choice-tone: light-dark(#ad7300, #ffce52); }
+.zb-workspace [data-tone='red'] { --zb-choice-tone: light-dark(#c43742, #ff7279); }
+.zb-workspace [data-tone='green'] { --zb-choice-tone: light-dark(#287a40, #79cd65); }
+.zb-workspace [data-tone='sky'] { --zb-choice-tone: light-dark(#206cae, #62bdf8); }
+.zb-workspace [data-tone='violet'] { --zb-choice-tone: light-dark(#7153ac, #baa0f7); }
+.zb-workspace [data-tone='rose'] { --zb-choice-tone: light-dark(#a13c85, #ee8acb); }
+.zb-workspace [data-tone='orange'] { --zb-choice-tone: light-dark(#a9551b, #ffab64); }
+.zb-workspace [data-tone='neutral'] { --zb-choice-tone: light-dark(#69707a, #b2b7bf); }
+.zb-workspace [data-tone='teal'] { --zb-choice-tone: light-dark(#227773, #6ed2c9); }
+.zb-workspace .zb-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32em;
+}
+.zb-workspace .zb-type-label { overflow: hidden; text-overflow: ellipsis; }
+.zb-workspace .zb-type-badge[data-item-type='journalArticle'] { --zb-choice-tone: light-dark(#2b69a7, #87bcef); }
+.zb-workspace .zb-type-badge[data-item-type='conferencePaper'] { --zb-choice-tone: light-dark(#217b70, #76d1bd); }
+.zb-workspace .zb-type-badge[data-item-type='preprint'] { --zb-choice-tone: light-dark(#8053ad, #c2a5f9); }
+.zb-workspace .zb-type-badge:is([data-item-type='book'], [data-item-type='bookSection']) {
+  --zb-choice-tone: light-dark(#966000, #eac269);
+}
+.zb-workspace .zb-type-badge[data-item-type='thesis'] { --zb-choice-tone: light-dark(#565bb3, #adb6ff); }
+.zb-workspace .zb-type-badge[data-item-type='webpage'] { --zb-choice-tone: light-dark(#267399, #86c6e4); }
+.zb-workspace .zb-type-badge[data-item-type='report'] { --zb-choice-tone: light-dark(#526a86, #a0bce1); }
+.zb-workspace [data-column='tags'] .zb-cell-pill:not(.zb-cell-pill-more),
+.zb-workspace .zb-cell-pill[data-tone], .zb-workspace .zb-type-badge {
+  --zb-pill-accent: var(--zb-native-tag-color, var(--zb-choice-tone, var(--zb-muted)));
+  background: color-mix(in srgb, var(--zb-surface) 89%, var(--zb-pill-accent));
+  border-color: color-mix(in srgb, var(--zb-border) 70%, var(--zb-pill-accent));
+  color: var(--zb-text);
 }
 .zb-workspace .zb-cell-pill-more { color: var(--zb-muted); font-variant-numeric: tabular-nums; }
-.zb-workspace .zb-pdf-button {
+.zb-workspace .zb-attachment-button {
   display: grid;
   place-items: center;
   width: 100%;
   padding: 0;
-  color: color-mix(in srgb, var(--zb-accent) 70%, var(--zb-text));
 }
-.zb-workspace .zb-pdf-mark {
-  display: grid;
-  place-items: center;
-  width: 2.65em;
-  height: 1.45em;
-  border: 1px solid currentColor;
-  border-radius: 0.22em;
-  font-size: 0.85em;
-  font-weight: 700;
-  line-height: 1;
-}
-.zb-workspace .zb-pdf-mark::before { content: 'PDF'; }
 .zb-workspace .zb-editor {
   position: absolute;
   inset-block-start: 1px;
@@ -641,8 +682,7 @@ export const workspaceCSS = String.raw`
 }
 .zb-workspace[data-appearance='terminal'] :is(
   button, input, select, textarea,
-  .zb-pane, .zb-warning, .zb-bulk, .zb-table-wrap, .zb-editor,
-  .zb-pdf-mark
+  .zb-pane, .zb-warning, .zb-bulk, .zb-table-wrap, .zb-editor
 ) {
   border-radius: 0;
 }

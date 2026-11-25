@@ -9,8 +9,16 @@ export const OPTION_COLORS = [
   'violet',
   'teal',
   'rose',
+  'red',
+  'orange',
 ] as const;
 export type OptionColorKey = (typeof OPTION_COLORS)[number];
+
+export interface TagColorRule {
+  readonly kind: 'tag' | 'prefix';
+  readonly name: string;
+  readonly color: OptionColorKey;
+}
 
 export interface Property {
   readonly key: string;
@@ -231,6 +239,8 @@ export interface Scope {
   readonly label: string;
 }
 
+export type AttachmentKind = 'pdf' | 'epub' | 'snapshot' | 'file';
+
 export interface Row
   extends Readonly<Partial<Record<Exclude<NativeColumn, 'tags' | 'pdf' | 'collections'>, string>>> {
   readonly id: number;
@@ -240,8 +250,11 @@ export interface Row
   readonly year: string;
   readonly source: string;
   readonly type: string;
+  readonly itemType?: string;
   readonly tags: readonly string[];
+  readonly nativeTagColors?: ReadonlyMap<string, string>;
   readonly pdf: boolean;
+  readonly attachment?: AttachmentKind;
   readonly added: string;
   readonly collections?: readonly string[];
   readonly extra: string;
@@ -257,6 +270,7 @@ export interface Preferences {
   readonly properties: readonly Property[];
   readonly views: readonly View[];
   readonly active: string;
+  readonly tagColors?: readonly TagColorRule[];
 }
 
 export type ConfigChange =
@@ -278,6 +292,12 @@ export type ConfigChange =
       readonly kind: 'set-option-color';
       readonly key: string;
       readonly option: string;
+      readonly color: OptionColorKey | undefined;
+    }
+  | {
+      readonly kind: 'set-tag-color';
+      readonly target: TagColorRule['kind'];
+      readonly name: string;
       readonly color: OptionColorKey | undefined;
     }
   | { readonly kind: 'delete-property'; readonly key: string; readonly clean: boolean };
@@ -304,6 +324,6 @@ export interface WorkspaceHost {
   changeTag(id: number, tag: string, add: boolean): Promise<void>;
   bulk(ids: readonly number[], change: BulkChange): Promise<BulkResult>;
   suggestPropertyKey(key: string, existing: readonly Property[]): string | undefined;
-  openItem(id: number, pdf: boolean): Promise<void>;
+  openItem(id: number, target: boolean | 'attachment'): Promise<void>;
   subscribe(listener: (kind: 'data' | 'settings') => void): () => void;
 }

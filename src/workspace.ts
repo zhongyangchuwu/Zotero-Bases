@@ -6,7 +6,6 @@ import {
   NATIVE_COLUMN_DEFINITIONS,
   NATIVE_COLUMNS,
   isNativeColumn,
-  OPTION_COLORS,
   type BulkChange,
   type Catalog,
   type Column,
@@ -25,9 +24,10 @@ import {
   type Row,
   type SortRule,
   type View,
+  type TagColorRule,
   type WorkspaceHost,
 } from './contracts';
-import { createCellRenderers } from './cell-renderers';
+import { createCellRenderers, optionTone } from './cell-renderers';
 import { scopeCustomCSS } from './custom-css';
 import { createFieldIcon } from './field-icons';
 import {
@@ -45,6 +45,7 @@ import type { SyncPort } from './sync';
 import { mountSyncBadge } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
 import { TableKeys, type TableCommand } from './table-keys';
+import { resolveTagColors } from './tag-colors';
 import { flattenRows, VirtualLayout, type VirtualRow } from './virtual-layout';
 
 const OVERSCAN = 170;
@@ -52,6 +53,7 @@ const FALLBACK_VIEWPORT_HEIGHT = 680;
 const SEARCH_DELAY = 140;
 const SELECT_COLUMN_WIDTH = 36;
 const COLUMN_ACTION_WIDTH = 40;
+const PALETTE = ['amber', 'red', 'green', 'sky', 'violet', 'rose', 'orange', 'neutral'] as const;
 
 function defaultColumnWidth(column: Column): number {
   return isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column].defaultWidth : 140;
@@ -133,6 +135,7 @@ const words = {
   inCollection: ['In collection', '属于分类'],
   outsideCollection: ['Not in collection', '不属于分类'],
   openPDF: ['Open PDF', '打开 PDF'],
+  openAttachment: ['Open attachment', '打开附件'],
   openLink: ['Open external link', '打开外部链接'],
   copyDOI: ['Copy DOI', '复制 DOI'],
   filters: ['Filters', '筛选'],
@@ -175,11 +178,12 @@ const words = {
   automaticColor: ['Automatic color', '自动配色'],
   neutral: ['Gray', '灰色'],
   green: ['Green', '绿色'],
-  amber: ['Amber', '琥珀色'],
+  amber: ['Yellow', '黄色'],
   sky: ['Blue', '蓝色'],
   violet: ['Violet', '紫色'],
-  teal: ['Teal', '青色'],
-  rose: ['Rose', '玫红色'],
+  rose: ['Magenta', '品红色'],
+  red: ['Red', '红色'],
+  orange: ['Orange', '橙色'],
   deleteProperty: ['Delete property', '删除属性'],
   deleteOption: ['Delete option', '删除选项'],
   definitionOnly: ['Remove definition only', '仅移除定义'],
@@ -203,6 +207,16 @@ const words = {
   tagName: ['New or existing tag', '新建或现有标签'],
   addTag: ['Add tag', '添加标签'],
   removeTag: ['Remove tag', '移除标签'],
+  tagColors: ['Tag colors', '标签配色'],
+  tagColorTarget: ['Match by', '匹配方式'],
+  exactTag: ['Exact tag', '精确标签'],
+  tagPrefix: ['Tag prefix', '标签前缀'],
+  tagColorName: ['Tag or prefix', '标签或前缀'],
+  resetTagColor: ['Use inherited color', '恢复继承颜色'],
+  tagColorPriority: [
+    'Zotero colors take priority, then exact tags, then the longest matching prefix.',
+    '优先使用 Zotero 原生颜色，其次是精确标签，再按最长匹配前缀取色。',
+  ],
   table: ['Items', '条目'],
   loading: ['Loading items…', '正在加载条目…'],
   selectAll: ['Select all matching items', '选择所有匹配条目'],
@@ -311,6 +325,7 @@ function mountWorkspaceSurface(
   const t = messages(words, options.language);
   const mountId = `zb-${++nextId}`;
   let preferences = host.settings();
+  let tagColor = resolveTagColors(preferences.tagColors);
   const savedView = preferences.views.find((view) => view.id === preferences.active);
   const restored =
     state && state.viewID === savedView?.id && state.scope === savedView.scope ? state : undefined;
@@ -355,6 +370,7 @@ function mountWorkspaceSurface(
   let closeEditor: ((restore: boolean) => void) | undefined;
   let recycleEditor: (() => void) | undefined;
   let editorKey: ((event: KeyboardEvent) => boolean) | undefined;
+  let updateEditorColors: (() => void) | undefined;
   const keyTarget: EventTarget = window ?? root;
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
@@ -362,6 +378,7 @@ function mountWorkspaceSurface(
     authorFormat: () => globals.authorFormat,
     columnName,
     open: openRow,
+    tagColor: (row, label) => tagColor(row, label),
     linkActions: options.linkActions,
     toggle(row, property, checked) {
       saveCell(host.setProperty(row.id, property.key, checked ? true : null));
@@ -485,6 +502,7 @@ function mountWorkspaceSurface(
   surface.lang = options.language;
   const popovers = createPopover(surface);
   const headerMenu = createPane(t('columnMenu'), 'zb-view-action-list');
+  const tagColorPane = createPane(t('tagColors'));
   let columnsFromTail = false;
   let moreColumnsOpen = false;
 
@@ -951,12 +969,24 @@ function mountWorkspaceSurface(
     const previousView = activeView();
     const changedProperties = !same(old.properties, incoming.properties);
     const changedViews = old.active !== incoming.active || !same(old.views, incoming.views);
-    if (!changedProperties && !changedViews) return;
+    const changedTagColors = !same(old.tagColors, incoming.tagColors);
+    if (!changedProperties && !changedViews && !changedTagColors) return;
     preferences = {
       properties: changedProperties ? incoming.properties : old.properties,
       views: changedViews ? incoming.views : old.views,
       active: incoming.active,
+      tagColors: changedTagColors ? incoming.tagColors : old.tagColors,
     };
+    if (changedTagColors) {
+      tagColor = resolveTagColors(preferences.tagColors);
+      if (popovers.isOpen(tagColorPane)) refreshTagColorPane();
+      repaintPills('tags');
+    }
+    if (!changedProperties && !changedViews) return;
+    if (changedProperties && closeEditor) {
+      repaintPills('options');
+      updateEditorColors?.();
+    }
     const view = activeView();
     const changedActive = previousView.id !== view.id;
     const changedScope = previousView.scope !== view.scope;
@@ -1521,6 +1551,17 @@ function mountWorkspaceSurface(
         }),
       );
     }
+    if (column === 'tags') {
+      columns.push(
+        button(t('tagColors'), () => {
+          refreshTagColorPane();
+          popovers.close(false);
+          popovers.open(trigger, tagColorPane, {
+            initialFocus: () => tagColorPane.querySelector('input'),
+          });
+        }),
+      );
+    }
     headerMenu.replaceChildren(...sorting, element('hr'), ...columns);
     openPane(trigger, headerMenu);
   }
@@ -2030,32 +2071,144 @@ function mountWorkspaceSurface(
     );
     focusKey(remove, JSON.stringify(['option', key, label]));
     line.append(rename, remove);
-    const palette = element('div', 'zb-option-palette');
-    palette.setAttribute('role', 'group');
-    palette.setAttribute('aria-label', scopedName(t('optionColor'), context));
-    const current =
-      property.optionColors && Object.hasOwn(property.optionColors, label)
-        ? property.optionColors[label]
-        : undefined;
-    const colors: readonly (OptionColorKey | undefined)[] = [undefined, ...OPTION_COLORS];
-    for (const color of colors) {
-      const swatch = button(
-        color ? '' : '↺',
-        () => {
-          void changeProperty({ kind: 'set-option-color', key, option: label, color });
-        },
-        'zb-option-swatch',
-        scopedName(t(color ?? 'automaticColor'), context),
-      );
-      if (color) swatch.dataset.tone = color;
-      swatch.setAttribute('aria-pressed', String(color === current));
-      focusKey(swatch, JSON.stringify(['color', key, label, color]));
-      palette.append(swatch);
+    const palette = colorPalette(
+      t('optionColor'),
+      context,
+      () => optionColor(property.key, label),
+      (color) => setOptionColor(property.key, label, color),
+    );
+    for (const swatch of palette.node.querySelectorAll('button')) {
+      focusKey(swatch, JSON.stringify(['color', key, label, swatch.dataset.tone]));
     }
-    line.append(palette);
+    line.append(palette.node);
     if (deleteChoice?.key === key && deleteChoice.option === label)
       line.append(deleteActions(key, label));
     return line;
+  }
+
+  function optionColor(key: string, label: string): OptionColorKey | undefined {
+    const colors = preferences.properties.find((property) => property.key === key)?.optionColors;
+    return colors && Object.hasOwn(colors, label) ? colors[label] : undefined;
+  }
+
+  function setOptionColor(key: string, option: string, color: OptionColorKey | undefined): void {
+    void changeProperty({ kind: 'set-option-color', key, option, color });
+  }
+
+  function colorPalette(
+    label: string,
+    context: string,
+    current: () => OptionColorKey | undefined,
+    change: (color: OptionColorKey | undefined) => void,
+    reset = t('automaticColor'),
+  ) {
+    const node = element('div', 'zb-option-palette');
+    node.setAttribute('role', 'group');
+    const caption = (text: string) => (context ? scopedName(text, context) : text);
+    node.setAttribute('aria-label', caption(label));
+    const swatches = PALETTE.map((color) => {
+      const swatch = button('', () => change(color), 'zb-option-swatch', caption(t(color)));
+      swatch.dataset.tone = color;
+      return swatch;
+    });
+    const clear = button('↺', () => change(undefined), 'zb-option-swatch', caption(reset));
+    node.append(...swatches, clear);
+    function update(disabled = false): void {
+      const color = current();
+      for (const swatch of swatches) {
+        swatch.disabled = disabled;
+        swatch.setAttribute('aria-pressed', String(swatch.dataset.tone === color));
+      }
+      clear.disabled = disabled;
+      clear.setAttribute('aria-pressed', String(color === undefined));
+    }
+    update();
+    return { node, update };
+  }
+
+  function buildTagColorPane(): () => void {
+    const target = select(
+      t('tagColorTarget'),
+      [
+        ['tag', t('exactTag')],
+        ['prefix', t('tagPrefix')],
+      ],
+      'tag',
+    );
+    const name = input(t('tagColorName'));
+    name.placeholder = 'topic/';
+    const list = element('datalist');
+    list.id = `${mountId}-tag-color-names`;
+    suggestTags(name, list);
+    const rules = element('div', 'zb-options');
+    const targetKind = (): TagColorRule['kind'] => (target.value === 'prefix' ? 'prefix' : 'tag');
+    const targetName = (): string => name.value.trim().normalize();
+    const palette = colorPalette(
+      t('tagColors'),
+      '',
+      () => {
+        const value = targetName();
+        const kind = targetKind();
+        return preferences.tagColors?.find((rule) => rule.kind === kind && rule.name === value)
+          ?.color;
+      },
+      (color) => {
+        const value = targetName();
+        if (value)
+          void changeProperty({ kind: 'set-tag-color', target: targetKind(), name: value, color });
+      },
+      t('resetTagColor'),
+    );
+    const update = () => palette.update(!targetName());
+    name.addEventListener('input', update);
+    function updateTarget(): void {
+      if (targetKind() === 'tag') name.setAttribute('list', list.id);
+      else name.removeAttribute('list');
+      update();
+    }
+    target.addEventListener('change', updateTarget);
+    const field = element('div', 'zb-line');
+    field.append(withChevron(target), name, list);
+    tagColorPane.append(field, palette.node, element('small', '', t('tagColorPriority')), rules);
+    return () => {
+      update();
+      renderRegion(rules, () => {
+        rules.replaceChildren(
+          ...(preferences.tagColors ?? []).map(({ kind, name: value, color }) => {
+            const caption = `${kind === 'prefix' ? t('tagPrefix') : t('exactTag')}: ${value}`;
+            const rule = button(
+              caption,
+              () => {
+                target.value = kind;
+                name.value = value;
+                updateTarget();
+                name.focus();
+              },
+              'zb-color-control',
+            );
+            rule.dataset.tone = color;
+            focusKey(rule, JSON.stringify([kind, value]));
+            return rule;
+          }),
+        );
+      });
+    };
+  }
+
+  function repaintPills(kind: 'tags' | 'options'): void {
+    if (!tableBody) return;
+    const { columns } = tableBody;
+    for (let index = 0; index < columns.length; index++) {
+      const column = columns[index]!;
+      const property = kind === 'options' ? propertyFor(column) : undefined;
+      if (kind === 'tags' ? column !== 'tags' : !property || !isSelectProperty(property.type))
+        continue;
+      for (const [key, line] of mounted) {
+        const entry = entries[layout.indexOf(key)];
+        if (entry?.kind === 'item')
+          cells.paintColors(entry.row, column, property, line.cells[index + 1]!);
+      }
+    }
   }
 
   function buildOptionForm(property: Property): HTMLFormElement {
@@ -2504,6 +2657,11 @@ function mountWorkspaceSurface(
       }
     });
     if (columnsFromTail) popovers.reanchor(tail ?? columnTool, columnPane);
+    if (popovers.isOpen(tagColorPane)) {
+      const trigger = headerTrigger('tags');
+      if (trigger) popovers.reanchor(trigger, tagColorPane);
+      else popovers.close(false);
+    }
     if (initialScroll && items) {
       const restoredTop = initialScroll.key ? layout.indexOf(initialScroll.key) : -1;
       tableWrap.scrollLeft = initialScroll.left;
@@ -3057,9 +3215,9 @@ function mountWorkspaceSurface(
     return line;
   }
 
-  function openRow(row: Row, pdf: boolean): void {
+  function openRow(row: Row, target: boolean | 'attachment'): void {
     showStatus('');
-    void host.openItem(row.id, pdf).catch(() => showStatus(t('openError'), true));
+    void host.openItem(row.id, target).catch(() => showStatus(t('openError'), true));
   }
 
   function renderRow(row: Row, columns: readonly Column[]): HTMLTableRowElement {
@@ -3127,6 +3285,7 @@ function mountWorkspaceSurface(
       closeEditor = undefined;
       recycleEditor = undefined;
       editorKey = undefined;
+      updateEditorColors = undefined;
       controls.remove();
       opener.classList.remove('zb-editor-opener');
       if (restore) cell.focus({ preventScroll: true });
@@ -3207,7 +3366,20 @@ function mountWorkspaceSurface(
     );
     const available = property.options ?? [];
     const labels = new Set([...available, ...selected]);
-    const selections = element('div', 'zb-options');
+    const selections = element('div', 'zb-options zb-editor-choices');
+    const paletteSlot = element('div', 'zb-choice-palette');
+    paletteSlot.hidden = true;
+    const colorControls = new Map<HTMLButtonElement, string>();
+    let paletteTrigger: HTMLButtonElement | undefined;
+    let refreshPalette: (() => void) | undefined;
+    updateEditorColors = () => {
+      const current = preferences.properties.find(({ key }) => key === property.key);
+      if (current) {
+        for (const [trigger, label] of colorControls)
+          trigger.dataset.tone = optionTone(current, label);
+      }
+      refreshPalette?.();
+    };
     const choices: HTMLButtonElement[] = [];
     const write = (): void => {
       const values = [...selected];
@@ -3242,7 +3414,37 @@ function mountWorkspaceSurface(
       });
       choice.setAttribute('aria-pressed', String(selected.has(label)));
       choices.push(choice);
-      selections.append(choice);
+      const choiceRow = element('span', 'zb-editor-choice');
+      choiceRow.append(choice);
+      if (known) {
+        const context = `${property.key}: ${label}`;
+        const trigger = button(
+          '',
+          () => {
+            const same = paletteTrigger === trigger;
+            paletteTrigger?.setAttribute('aria-expanded', 'false');
+            paletteTrigger = same ? undefined : trigger;
+            paletteSlot.hidden = same;
+            if (same) return;
+            trigger.setAttribute('aria-expanded', 'true');
+            const palette = colorPalette(
+              t('optionColor'),
+              context,
+              () => optionColor(property.key, label),
+              (color) => setOptionColor(property.key, label, color),
+            );
+            refreshPalette = palette.update;
+            paletteSlot.replaceChildren(palette.node);
+            firstControl(palette.node)?.focus({ preventScroll: true });
+          },
+          'zb-option-swatch',
+          scopedName(t('optionColor'), context),
+        );
+        trigger.setAttribute('aria-expanded', 'false');
+        colorControls.set(trigger, label);
+        choiceRow.append(trigger);
+      }
+      selections.append(choiceRow);
     }
     const clear = button(
       t('clear'),
@@ -3261,7 +3463,8 @@ function mountWorkspaceSurface(
       clear,
       button(t('done'), () => close(true)),
     );
-    controls.append(selections, buttons);
+    controls.append(selections, paletteSlot, buttons);
+    updateEditorColors();
     closeOnBlur(controls, close);
     editorKey = (event) => {
       const index = choices.indexOf(event.target as HTMLButtonElement);
@@ -3384,6 +3587,7 @@ function mountWorkspaceSurface(
 
   const [propertyForm, updatePropertyHint] = buildPropertyForm();
   propertyPane.append(propertyForm, propertyList);
+  const refreshTagColorPane = buildTagColorPane();
   renderTabs();
   renderScope();
   renderColumns();
