@@ -18,6 +18,9 @@ const properties: readonly Property[] = [
   { key: 'Status', type: 'single-select', options: ['Done', 'Reading'] },
   { key: 'Reviewed', type: 'checkbox' },
   { key: 'Memo', type: 'text' },
+  { key: 'Stars', type: 'rating' },
+  { key: 'Read On', type: 'date' },
+  { key: 'Project Link', type: 'url' },
 ];
 const tags = new Set(['reading', 'elsewhere']);
 
@@ -126,6 +129,46 @@ describe('groupRows', () => {
     ]);
     const desc = groupRows(rows, { column: 'date', direction: 'desc' }, properties, tags, 'en');
     expect(desc?.map(({ value }) => value)).toEqual(['2024-03', '2024-02', '2024-01', null]);
+  });
+
+  it('groups ratings as canonical strings, preserving row order and keeping missing last', () => {
+    const rows = [
+      row(1, { extra: 'Stars: 5' }),
+      row(2, { extra: 'Stars: 1' }),
+      row(3, { extra: 'Stars: 6' }),
+      row(4, { extra: 'Stars: 5' }),
+      row(5, {}),
+      row(6, { extra: 'Stars: 3' }),
+    ];
+    const group = { column: 'property:Stars', direction: 'desc' } as const;
+    expect(groupRows(rows, group, properties, tags, 'en')).toEqual([
+      { value: '5', rows: [rows[0], rows[3]] },
+      { value: '3', rows: [rows[5]] },
+      { value: '1', rows: [rows[1]] },
+      { value: null, rows: [rows[2], rows[4]] },
+    ]);
+    const asc = groupRows(rows, { ...group, direction: 'asc' }, properties, tags, 'en');
+    expect(asc?.map(({ value }) => value)).toEqual(['1', '3', '5', null]);
+  });
+
+  it('groups only full custom dates by month and does not group URLs', () => {
+    const rows = [
+      row(1, { extra: 'Read On: 2024-02-29\nProject Link: https://example.org' }),
+      row(2, { extra: 'Read On: 2024-02' }),
+      row(3, { extra: 'Read On: 2024-01-01' }),
+      row(4, { extra: 'Read On: 2024-02-01' }),
+      row(5, { extra: 'Read On: 2024-02-29T23:50:00-02:00' }),
+      row(6, {}),
+    ];
+    const group = { column: 'property:Read On', direction: 'desc' } as const;
+    expect(groupRows(rows, group, properties, tags, 'en')).toEqual([
+      { value: '2024-02', rows: [rows[0], rows[3]] },
+      { value: '2024-01', rows: [rows[2]] },
+      { value: null, rows: [rows[1], rows[4], rows[5]] },
+    ]);
+    expect(
+      groupRows(rows, { ...group, column: 'property:Project Link' }, properties, tags, 'en'),
+    ).toBeUndefined();
   });
 
   it('groups numeric native values including zero without grouping unsupported native columns', () => {

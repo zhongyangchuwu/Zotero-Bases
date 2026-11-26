@@ -10,7 +10,9 @@ import {
   type PropertyValue,
   type Row,
 } from './contracts';
+import { createEditIcon, createFieldIcon } from './field-icons';
 import type { GlobalPreferences } from './global-preferences';
+import { isISODate, isRating, webURL } from './property-values';
 import { dateDay } from './query';
 import { createAttachmentIcon, createItemTypeIcon } from './semantic-icons';
 
@@ -20,6 +22,7 @@ export interface CellActions {
   linkActions?: { open(url: string): void; copy(text: string): void };
   authorFormat?: () => GlobalPreferences['authorFormat'];
   toggle(row: Row, property: Property, checked: boolean): void;
+  rate?(row: Row, property: Property, value: string | null): void;
   edit(
     row: Row,
     column: Column,
@@ -41,6 +44,8 @@ export interface CellActions {
       | 'copyDOI'
       | 'readOnly'
       | 'edit'
+      | 'rating'
+      | 'clearRating'
       | 'untitled',
   ): string;
 }
@@ -170,25 +175,6 @@ function fitPills(table: HTMLTableElement): void {
       (pill as HTMLElement).hidden = true;
       pill = pill.previousElementSibling;
     }
-  }
-}
-
-function webURL(value: string): URL | undefined {
-  const input = value.trim();
-  // Do not let WHATWG recovery turn missing slashes, backslashes, or an empty host into a link.
-  const authority = /^https?:\/\/([^/?#\\\s]+)/iu.exec(input)?.[1];
-  if (!authority || authority.includes('@') || /[\r\n\t\\]/u.test(input)) return;
-  try {
-    const url = new URL(input);
-    if (
-      (url.protocol === 'http:' || url.protocol === 'https:') &&
-      url.hostname &&
-      !url.username &&
-      !url.password
-    )
-      return url;
-  } catch {
-    // An invalid field remains plain text.
   }
 }
 
@@ -483,6 +469,92 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     }
   }
 
+  function rating(context: Cell, property: Property): void {
+    const { row, column, value, cell } = context;
+    let current = typeof value === 'string' && isRating(value) ? Number(value) : 0;
+    const rate = row.writable ? actions.rate : undefined;
+    const group = element('span', 'zb-rating');
+    const ratingLabel = actions.text('rating');
+    const label = `${ratingLabel} · ${actions.columnName(column)} · ${rowName(row)}`;
+    group.setAttribute('role', rate ? 'group' : 'img');
+    group.setAttribute(
+      'aria-label',
+      rate ? label : `${label}: ${current}/5 · ${actions.text('readOnly')}`,
+    );
+    for (let index = 1; index <= 5; index++) {
+      const button = rate ? element('button', 'zb-rating-star') : undefined;
+      const star = button ?? element('span', 'zb-rating-star');
+      const icon = createFieldIcon(document, column, 'rating');
+      icon.classList.replace('zb-field-icon', 'zb-rating-icon');
+      star.append(icon);
+      if (rate && button) {
+        button.type = 'button';
+        button.tabIndex = -1;
+        control(button, context);
+        button.dataset.focus += `:${index}`;
+        button.dataset.rating = String(index);
+        button.setAttribute('aria-label', `${ratingLabel} · ${index}/5`);
+        button.addEventListener('click', () => {
+          current = current === index ? 0 : index;
+          // A second click can arrive before the saved value is painted by the host.
+          paint();
+          rate(row, property, current === 0 ? null : String(current));
+        });
+      }
+      group.append(star);
+    }
+    function paint(): void {
+      group.toggleAttribute('data-empty', current === 0);
+      for (let i = 0; i < group.children.length; i++) {
+        const star = group.children[i] as HTMLElement;
+        star.toggleAttribute('data-filled', i < current);
+        if (rate) {
+          const pressed = i + 1 === current;
+          star.setAttribute('aria-pressed', String(pressed));
+          star.title = pressed ? actions.text('clearRating') : star.getAttribute('aria-label')!;
+        }
+      }
+    }
+    paint();
+    cell.classList.add('zb-rating-cell');
+    cell.append(group);
+  }
+
+  function propertyURL(context: Cell, property: Property): void {
+    const { row, column, value, cell } = context;
+    const text = typeof value === 'string' ? value : '';
+    const url = webURL(text);
+    const compact = url ? `${url.host}${url.pathname === '/' ? '' : url.pathname}` : text;
+    const linkActions = actions.linkActions;
+    cell.classList.add('zb-cell-url');
+    if (url && linkActions) {
+      const open = linkButton(
+        'zb-link-open zb-url-value',
+        compact,
+        `${actions.text('openLink')} · ${text}`,
+        () => linkActions.open(url.href),
+      );
+      control(open, context);
+      cell.append(open);
+    } else if (text) {
+      const label = element('span', 'zb-url-value', compact);
+      label.title = text;
+      cell.append(label);
+    }
+    if (row.writable) {
+      const opener = button(
+        context,
+        () => actions.edit(row, column, property, value, cell, opener),
+        'zb-url-edit',
+      );
+      named(opener, text ? `${editLabel(context)}: ${text}` : editLabel(context));
+      opener.append(createEditIcon(document));
+      cell.append(opener);
+    } else {
+      cell.title = actions.text('readOnly');
+    }
+  }
+
   const byType: Record<NativeValueType, (context: Cell) => void> = {
     text: plain,
     number: nativeNumber,
@@ -519,6 +591,14 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       editable(context, property, typeof value === 'string' && value ? [value] : undefined);
     },
     'multi-select': editList,
+    rating,
+    url: propertyURL,
+    date(context, property) {
+      const { cell, value } = context;
+      cell.classList.add('zb-cell-date', 'zb-cell-monospace');
+      const date = typeof value === 'string' && isISODate(value) ? value : null;
+      editable(date === value ? context : { ...context, value: date }, property);
+    },
   };
 
   function render(

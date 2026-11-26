@@ -14,7 +14,10 @@ export type TableCommand =
   | 'toggle'
   | 'open'
   | 'escape'
-  | 'prefix';
+  | 'prefix'
+  | { readonly rating: Exclude<RatingKey, '0'> | null };
+
+type RatingKey = '0' | '1' | '2' | '3' | '4' | '5';
 
 export class TableKeys {
   private prefixTime: number | undefined;
@@ -92,6 +95,13 @@ export class TableKeys {
         return repeat ? undefined : 'open';
       case 'Escape':
         return repeat ? undefined : 'escape';
+      case '0':
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+        return repeat ? undefined : { rating: key === '0' ? null : key };
       default:
         return undefined;
     }

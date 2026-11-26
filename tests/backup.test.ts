@@ -35,18 +35,42 @@ describe('configuration backup', () => {
   it('exports schema and views and restores them without changing other preferences', () => {
     const source = preferences();
     const config = createConfig(source.prefs, () => 'user', validateProperty);
-    const mainView = { ...view, id: 'home' };
-    config.writeSchema([property]);
-    config.writeViews({ views: [mainView, view], active: view.id });
+    const mainView: View = {
+      ...view,
+      id: 'home',
+      frozenCount: 3,
+      columns: [
+        ...view.columns,
+        'property:Rating',
+        'property:Code Repository',
+        'property:Reading Date',
+      ],
+      sorts: [{ column: 'property:Rating', direction: 'desc' }, ...view.sorts],
+      filters: [
+        { column: 'property:Rating', operator: 'notEquals', value: '1' },
+        { column: 'property:Code Repository', operator: 'notContains', value: 'archive' },
+        { column: 'property:Reading Date', operator: 'before', value: '2025-01-01' },
+      ],
+      group: { column: 'property:Reading Date', direction: 'asc' },
+    };
+    const unfrozenView = { ...view, frozenCount: 0 };
+    const schema: Property[] = [
+      property,
+      { key: 'Rating', type: 'rating' },
+      { key: 'Code Repository', type: 'url' },
+      { key: 'Reading Date', type: 'date' },
+    ];
+    config.writeSchema(schema);
+    config.writeViews({ views: [mainView, unfrozenView], active: view.id });
     createGlobalPreferenceStore(source.prefs).set('appearance', 'terminal');
     const json = createConfigurationBackup(source.prefs, validateProperty).exportJSON();
-    expect(JSON.parse(json)).toEqual({ schema: [property], views: [mainView, view] });
+    expect(JSON.parse(json)).toEqual({ schema, views: [mainView, unfrozenView] });
 
     const target = preferences();
     const store = createGlobalPreferenceStore(target.prefs);
     store.set('appearance', 'modern');
     const backup = createConfigurationBackup(target.prefs, validateProperty);
-    expect(backup.importJSON(json)).toEqual({ properties: 1, views: 2 });
+    expect(backup.importJSON(json)).toEqual({ properties: 4, views: 2 });
     expect(backup.exportJSON()).toBe(json);
     const imported = createConfig(target.prefs, () => 'user', validateProperty).settings();
     expect(imported.active).toBe(mainView.id);
@@ -111,6 +135,8 @@ describe('configuration backup', () => {
       JSON.stringify({ schema: [property, { ...property, key: 'reading stage' }], views: [view] }),
       JSON.stringify({ schema: [], views: [view, { ...view, density: 'unknown' }] }),
       JSON.stringify({ schema: [{ ...property, optionColors: { Done: 'pink' } }], views: [view] }),
+      JSON.stringify({ schema: [], views: [{ ...view, frozenCount: -1 }] }),
+      JSON.stringify({ schema: [], views: [{ ...view, frozenCount: 2.5 }] }),
       ...[
         null,
         {},

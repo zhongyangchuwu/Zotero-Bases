@@ -242,10 +242,16 @@ describe('private Bases sync', () => {
     await sync.enable();
     const viewed = snapshot('On other device');
     const cloud: SyncSnapshot = {
-      schema: [{ ...viewed.schema[0]!, optionColors: { Done: 'green' } }],
+      schema: [
+        { ...viewed.schema[0]!, optionColors: { Done: 'green' } },
+        { key: 'Rating', type: 'rating' },
+        { key: 'Project Link', type: 'url' },
+        { key: 'Read On', type: 'date' },
+      ],
       views: [
         {
           ...viewed.views[0]!,
+          frozenCount: 2,
           sorts: [
             { column: 'property:Reading Stage', direction: 'desc' },
             { column: 'title', direction: 'asc' },
@@ -436,7 +442,10 @@ describe('private Bases sync', () => {
         version: 1,
         id: earlier,
         parents: [],
-        snapshot: { schema: [], views: [] },
+        snapshot: {
+          schema: [],
+          views: [{ ...snapshot('Older cloud').views[0]!, frozenCount: -1 }],
+        },
       }),
     };
     store.files.push(malformed);

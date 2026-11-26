@@ -30,6 +30,8 @@ const labels = {
   copyDOI: 'Copy DOI',
   readOnly: 'Read-only',
   edit: 'Edit',
+  rating: 'Rating',
+  clearRating: 'Clear rating',
   untitled: 'Untitled',
 };
 
@@ -37,6 +39,7 @@ function fixture(doc = document, enableLinks = true, tagColor?: CellActions['tag
   const open = vi.fn<CellActions['open']>();
   const edit = vi.fn<CellActions['edit']>();
   const toggle = vi.fn<CellActions['toggle']>();
+  const rate = vi.fn<NonNullable<CellActions['rate']>>();
   const openLink = vi.fn<NonNullable<CellActions['linkActions']>['open']>();
   const copyDOI = vi.fn<NonNullable<CellActions['linkActions']>['copy']>();
   const renderers = createCellRenderers(doc, {
@@ -45,10 +48,11 @@ function fixture(doc = document, enableLinks = true, tagColor?: CellActions['tag
     tagColor,
     edit,
     toggle,
+    rate,
     columnName: (column) => column.replace('property:', ''),
     text: (key) => labels[key],
   });
-  return { ...renderers, open, edit, toggle, openLink, copyDOI };
+  return { ...renderers, open, edit, toggle, rate, openLink, copyDOI };
 }
 
 function get<T extends HTMLElement>(root: ParentNode, selector: string): T {
@@ -218,6 +222,115 @@ describe('cell renderers', () => {
     expect(cell.querySelector('a, button')).toBeNull();
   });
 
+  it('rates and clears the same star without waiting for a row refresh', () => {
+    const { render, rate, edit } = fixture();
+    const rating: Property = { key: 'Importance', type: 'rating' };
+    const cell = render(row, 'property:Importance', rating, null);
+    const group = get(cell, '.zb-rating');
+    const stars = Array.from(group.querySelectorAll('button'));
+    const five = stars[4]!;
+    expect(group.hasAttribute('data-empty')).toBe(true);
+    expect(stars).toHaveLength(5);
+    expect(five.getAttribute('aria-label')).toBe('Rating · 5/5');
+
+    five.click();
+    expect(rate.mock.calls).toEqual([[row, rating, '5']]);
+    expect(group.hasAttribute('data-empty')).toBe(false);
+    expect(group.querySelectorAll('[data-filled]')).toHaveLength(5);
+    expect(five.getAttribute('aria-pressed')).toBe('true');
+    expect(five.title).toBe('Clear rating');
+
+    five.click();
+    expect(group.hasAttribute('data-empty')).toBe(true);
+    expect(group.querySelector('[aria-pressed=true]')).toBeNull();
+    stars[1]!.click();
+    expect(rate.mock.calls).toEqual([
+      [row, rating, '5'],
+      [row, rating, null],
+      [row, rating, '2'],
+    ]);
+    expect(group.querySelectorAll('[data-filled]')).toHaveLength(2);
+    expect(group.querySelector('[aria-pressed=true]')).toBe(stars[1]);
+    expect(edit).not.toHaveBeenCalled();
+  });
+
+  it('shows saved ratings without exposing write controls on read-only rows', () => {
+    const { render, rate } = fixture();
+    const rating: Property = { key: 'Importance', type: 'rating' };
+    const editable = render(row, 'property:Importance', rating, '3');
+    get(editable, 'button[aria-pressed=true]').click();
+    expect(rate.mock.calls).toEqual([[row, rating, null]]);
+
+    const cell = render({ ...row, writable: false }, 'property:Importance', rating, '3');
+    expect(cell.querySelector('button')).toBeNull();
+    expect(cell.querySelectorAll('[data-filled]')).toHaveLength(3);
+    expect(get(cell, '[role=img]').getAttribute('aria-label')).toContain('3/5');
+    get(cell, '[data-filled]').click();
+    expect(rate).toHaveBeenCalledTimes(1);
+  });
+
+  it('separates compact URL display and external opening from property editing', () => {
+    const { render, openLink, edit } = fixture();
+    const property: Property = { key: 'Homepage', type: 'url' };
+    const value = 'HTTPS://Example.test:8443/index?mode=full#details';
+    const cell = render(row, 'property:Homepage', property, value);
+    const link = get(cell, '.zb-link-control');
+    const editButton = get(cell, 'button:not(.zb-link-control)');
+    expect(link.textContent).toBe('example.test:8443/index');
+    expect(link.getAttribute('aria-label')).toBe(`Open link · ${value}`);
+
+    cell.click();
+    expect(openLink).not.toHaveBeenCalled();
+    expect(edit).not.toHaveBeenCalled();
+    link.click();
+    expect(openLink.mock.calls).toEqual([['https://example.test:8443/index?mode=full#details']]);
+    expect(edit).not.toHaveBeenCalled();
+    editButton.click();
+    expect(edit.mock.calls).toEqual([
+      [row, 'property:Homepage', property, value, cell, editButton],
+    ]);
+    expect(openLink).toHaveBeenCalledTimes(1);
+
+    const readOnly = render({ ...row, writable: false }, 'property:Homepage', property, value);
+    expect(readOnly.querySelector('button:not(.zb-link-control)')).toBeNull();
+    get(readOnly, '.zb-link-control').click();
+    expect(openLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves unsafe URLs inert and empty URLs visually blank with a named edit action', () => {
+    const { render, openLink, edit } = fixture();
+    const property: Property = { key: 'Homepage', type: 'url' };
+    const unsafe = render(row, 'property:Homepage', property, 'javascript:alert(1)');
+    expect(unsafe.querySelector('.zb-link-control')).toBeNull();
+    get(unsafe, '.zb-url-value').click();
+    expect(openLink).not.toHaveBeenCalled();
+    expect(edit).not.toHaveBeenCalled();
+
+    const blank = render(row, 'property:Homepage', property, null);
+    const editButton = get(blank, '.zb-url-edit');
+    expect(blank.textContent).toBe('');
+    expect(editButton.getAttribute('aria-label')).toBe('Edit · Homepage · A Paper');
+    blank.click();
+    expect(edit).not.toHaveBeenCalled();
+    editButton.click();
+    expect(edit.mock.calls).toEqual([
+      [row, 'property:Homepage', property, null, blank, editButton],
+    ]);
+  });
+
+  it('renders custom dates as strict ISO days and opens the scalar editor', () => {
+    const { render, edit } = fixture();
+    const property: Property = { key: 'Submitted', type: 'date' };
+    const value = '2024-02-29';
+    const cell = render(row, 'property:Submitted', property, value);
+    expect(cell.classList.contains('zb-cell-monospace')).toBe(true);
+    expect(cell.textContent).toBe(value);
+    const opener = get(cell, 'button');
+    opener.click();
+    expect(edit.mock.calls).toEqual([[row, 'property:Submitted', property, value, cell, opener]]);
+    expect(render(row, 'property:Submitted', property, '2024-02-30').textContent).toBe('');
+  });
+
   it('locates titles and opens available PDFs via distinct native XHTML buttons', () => {
     const xhtml = 'http://www.w3.org/1999/xhtml';
     const xul = 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul';
@@ -343,6 +456,10 @@ describe('cell renderers', () => {
     const icon = (column: Parameters<typeof createFieldIcon>[1]) => createFieldIcon(doc, column);
     expect(icon('dateModified').querySelector('path')?.getAttribute('d')).toBe(
       icon('accessDate').querySelector('path')?.getAttribute('d'),
+    );
+    const customDate = createFieldIcon(doc, 'property:Submitted', 'date');
+    expect(customDate.querySelector('path')?.getAttribute('d')).toBe(
+      icon('dateModified').querySelector('path')?.getAttribute('d'),
     );
     expect(icon('citationKey').querySelector('path')?.getAttribute('d')).not.toBe(
       icon('collections').querySelector('path')?.getAttribute('d'),

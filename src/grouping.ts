@@ -16,7 +16,7 @@ export interface RowGroup {
 }
 
 export function isGroupProperty({ type }: Property): boolean {
-  return type === 'single-select' || type === 'checkbox';
+  return type === 'single-select' || type === 'checkbox' || type === 'rating' || type === 'date';
 }
 
 /** Partition already filtered and sorted rows, or return undefined for an unavailable dependency. */
@@ -59,10 +59,17 @@ export function groupRows(
     const name = column.slice('property:'.length);
     const property = properties.find(({ key }) => key === name);
     if (!property || !isGroupProperty(property)) return undefined;
-    key = (row) => {
-      const value = readProperty(row.extra, property);
-      return typeof value === 'string' || typeof value === 'boolean' ? value : null;
-    };
+    if (property.type === 'date') {
+      key = (row) => {
+        const value = readProperty(row.extra, property);
+        return typeof value === 'string' ? value.slice(0, 7) : null;
+      };
+    } else {
+      key = (row) => {
+        const value = readProperty(row.extra, property);
+        return typeof value === 'string' || typeof value === 'boolean' ? value : null;
+      };
+    }
   }
 
   const buckets = new Map<GroupValue, Row[]>();

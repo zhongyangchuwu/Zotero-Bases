@@ -153,6 +153,25 @@ describe('TableKeys', () => {
     }
   });
 
+  it('maps only plain, non-repeated rating digits to exact set and clear commands', () => {
+    const keys = new TableKeys();
+    expect(keys.handle(key('0'))).toEqual({ rating: null });
+    for (const rating of ['1', '2', '3', '4', '5']) {
+      expect(keys.handle(key(rating))).toEqual({ rating });
+      for (const flags of [
+        { repeat: true },
+        { isComposing: true },
+        { ctrlKey: true },
+        { altKey: true },
+        { metaKey: true },
+        { shiftKey: true },
+      ]) {
+        expect(keys.handle(key(rating, flags))).toBeUndefined();
+      }
+    }
+    expect(keys.handle(key('6'))).toBeUndefined();
+  });
+
   it('ignores composition and cancels a pending prefix', () => {
     const keys = new TableKeys();
     expect(keys.handle(key('g'))).toBe('prefix');
