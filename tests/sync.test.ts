@@ -252,6 +252,13 @@ describe('private Bases sync', () => {
         {
           ...viewed.views[0]!,
           frozenCount: 2,
+          layout: 'board',
+          board: {
+            laneField: 'property:Reading Stage',
+            cardFields: ['creators', 'property:Rating', 'pdf'],
+            hideEmptyLanes: true,
+            collapsedLanes: ['null', '"Done"'],
+          },
           sorts: [
             { column: 'property:Reading Stage', direction: 'desc' },
             { column: 'title', direction: 'asc' },
@@ -375,6 +382,37 @@ describe('private Bases sync', () => {
     expect(sync.status().kind).toBe('ready');
   });
 
+  it('publishes board-only changes without replacing the table presentation', async () => {
+    const { store, transport } = library();
+    const local = snapshot('Inbox');
+    const table = { ...local.views[0]!, layout: 'table' } as const;
+    const owner = profile(transport, { ...local, views: [table] });
+    const sync = owner.start();
+    await sync.enable();
+    const withBoard: SyncSnapshot = {
+      ...local,
+      views: [
+        {
+          ...table,
+          board: {
+            laneField: 'property:Reading Stage',
+            cardFields: ['tags', 'creators'],
+            hideEmptyLanes: true,
+            collapsedLanes: ['"Done"'],
+          },
+        },
+      ],
+    };
+    owner.state.update(withBoard);
+    expect(sync.status().kind).toBe('pending');
+    await sync.syncNow();
+    expect(JSON.parse(store.files[1]!.text)).toMatchObject({
+      parents: [store.files[0]!.id],
+      snapshot: withBoard,
+    });
+    expect(sync.status().kind).toBe('ready');
+  });
+
   it('keeps local only on request and parents its new revision to all concurrent carrier roots', async () => {
     const { store, transport } = library();
     const left = store.add(snapshot('Left'));
@@ -449,6 +487,26 @@ describe('private Bases sync', () => {
       }),
     };
     store.files.push(malformed);
+    await sync.syncNow();
+    expect(sync.status().kind).toBe('error');
+    expect(owner.applied).toEqual([]);
+    expect(store.files).toHaveLength(3);
+
+    malformed.text = JSON.stringify({
+      version: 1,
+      id: earlier,
+      parents: [],
+      snapshot: {
+        schema: [],
+        views: [
+          {
+            ...snapshot('Older cloud').views[0]!,
+            layout: 'board',
+            board: { cardFields: [], hideEmptyLanes: false, collapsedLanes: [42] },
+          },
+        ],
+      },
+    });
     await sync.syncNow();
     expect(sync.status().kind).toBe('error');
     expect(owner.applied).toEqual([]);

@@ -652,6 +652,45 @@ describe('catalog search', () => {
     expect(search('hidden-note', { ...view(), columns: ['property:Memo'] })).toEqual([320]);
   });
 
+  it('matches board card fields plus core fields and all custom URLs, not table-only fields', () => {
+    const items: Catalog = {
+      rows: [
+        row(1, {
+          title: 'Research',
+          creators: 'Nora',
+          pages: '115–120',
+          pdf: true,
+          extra:
+            'Memo: card-note\nStatus: Reading\nCode Link: https://example.org/submission\nStars: 5',
+        }),
+        row(2, { title: 'Another paper' }),
+      ],
+      tags: new Set(),
+    };
+    const board: View = {
+      ...view(),
+      layout: 'board',
+      columns: ['title', 'pages', 'property:Status'],
+      board: {
+        laneField: 'property:Stars',
+        cardFields: ['property:Memo', 'property:Stars'],
+        hideEmptyLanes: false,
+        collapsedLanes: [],
+      },
+    };
+    const search = (visible: View, term: string) =>
+      queryCatalog(items, visible, properties, 'en', term).rows.map(({ id }) => id);
+    expect(search(board, 'research nora card-note submission')).toEqual([1]);
+    expect(search(board, '115–120')).toEqual([]);
+    expect(search(board, 'reading')).toEqual([]);
+    expect(search(board, '5')).toEqual([]);
+    const table: View = { ...board, layout: 'table' };
+    expect(search(table, 'research nora 115–120 reading submission')).toEqual([1]);
+    expect(search(table, 'card-note')).toEqual([]);
+    expect(search({ ...board, board: undefined }, 'research yes 5')).toEqual([1]);
+    expect(search({ ...board, board: { ...board.board!, cardFields: [] } }, 'yes')).toEqual([]);
+  });
+
   it('ANDs search with valid saved filters, preserves invalid indices and typed sorting', () => {
     const items: Catalog = {
       rows: [

@@ -7,6 +7,7 @@ import {
   OPTION_COLORS,
 } from './contracts';
 import type {
+  BoardSettings,
   Column,
   ConfigChange,
   Density,
@@ -80,8 +81,12 @@ function columnName(value: unknown): value is string {
   return typeof value === 'string' && !!value && value !== 'property:';
 }
 
+function propertyColumn(value: unknown): value is `property:${string}` {
+  return typeof value === 'string' && /^property:.+/u.test(value);
+}
+
 function column(value: unknown): value is Column {
-  return columnName(value) && (isNativeColumn(value) || /^property:.+/u.test(value));
+  return isNativeColumn(value) || propertyColumn(value);
 }
 
 function validFilter(value: unknown): boolean {
@@ -166,6 +171,26 @@ function columnWidths(value: unknown): NonNullable<View['columnWidths']> | undef
   return widths;
 }
 
+function boardSettings(value: unknown): BoardSettings | undefined {
+  if (!object(value)) return undefined;
+  const { laneField, cardFields, hideEmptyLanes, collapsedLanes } = value;
+  if (
+    (laneField !== undefined && !propertyColumn(laneField)) ||
+    !Array.isArray(cardFields) ||
+    !cardFields.every(column) ||
+    typeof hideEmptyLanes !== 'boolean' ||
+    !Array.isArray(collapsedLanes) ||
+    !collapsedLanes.every((id) => typeof id === 'string')
+  )
+    return undefined;
+  return {
+    ...(laneField !== undefined && { laneField }),
+    cardFields,
+    hideEmptyLanes,
+    collapsedLanes,
+  };
+}
+
 function view(value: unknown, strict = false): View | undefined {
   if (
     !object(value) ||
@@ -180,6 +205,8 @@ function view(value: unknown, strict = false): View | undefined {
   const group = grouping(value.group);
   const density = validDensity(value.density) ? value.density : undefined;
   const widths = columnWidths(value.columnWidths);
+  const layout = value.layout === 'table' || value.layout === 'board' ? value.layout : undefined;
+  const board = boardSettings(value.board);
   const frozenCount =
     typeof value.frozenCount === 'number' &&
     Number.isSafeInteger(value.frozenCount) &&
@@ -196,7 +223,9 @@ function view(value: unknown, strict = false): View | undefined {
       (value.group !== undefined && !validGrouping(value.group)) ||
       (value.density !== undefined && !density) ||
       (value.columnWidths !== undefined && !widths) ||
-      (value.frozenCount !== undefined && frozenCount === undefined))
+      (value.frozenCount !== undefined && frozenCount === undefined) ||
+      (value.layout !== undefined && !layout) ||
+      (value.board !== undefined && !board))
   )
     return undefined;
   return {
@@ -217,6 +246,8 @@ function view(value: unknown, strict = false): View | undefined {
     ...(density ? { density } : {}),
     ...(widths ? { columnWidths: widths } : {}),
     ...(frozenCount !== undefined ? { frozenCount } : {}),
+    ...(layout ? { layout } : {}),
+    ...(board ? { board } : {}),
   };
 }
 

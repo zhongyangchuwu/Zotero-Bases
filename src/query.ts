@@ -1,3 +1,4 @@
+import { boardCardFields } from './board-model';
 import {
   isNativeColumn,
   NATIVE_COLUMN_BY_KEY,
@@ -325,7 +326,8 @@ function compileSearch(
   const matched = terms.map(() => false);
   const searchable = new Set<Column>();
   for (const { key, search } of NATIVE_COLUMN_DEFINITIONS) if (search) searchable.add(key);
-  for (const column of view.columns) searchable.add(column);
+  const visible = view.layout === 'board' ? boardCardFields(view.board, properties) : view.columns;
+  for (const column of visible) searchable.add(column);
   const sources: ValueSource[] = [];
   for (const column of searchable) {
     const source = isNativeColumn(column) ? column : propertyIn(column, properties);

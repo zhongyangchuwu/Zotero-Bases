@@ -330,6 +330,7 @@ describe('Zotero Bases workspace', () => {
     click(root, 'Open in new window');
     expect(popOut).toHaveBeenCalledTimes(1);
     click(root, 'New view');
+    click(root, 'New table view');
     const created = active(host);
     expect(created).toMatchObject({ name: 'New view', scope: 'personal' });
     expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('New view');
@@ -381,6 +382,117 @@ describe('Zotero Bases workspace', () => {
     click(root, 'Library');
     expect(active(host).id).toBe('default');
     expect(active(host).frozenCount).toBeUndefined();
+  });
+
+  it('keeps table geometry and board settings independent when changing layout', async () => {
+    const base: View = {
+      ...defaultView,
+      columns: ['title', 'year', 'property:Reviewed'],
+      columnWidths: { title: 270 },
+      density: 'wrap',
+      group: { column: 'year', direction: 'desc' },
+      frozenCount: 1,
+    };
+    const { host } = fixture([sample], base);
+    const { root } = attach(host);
+    await settle();
+    openTool(root, 'View actions');
+    click(root, 'Switch to board view');
+    expect(active(host).board).toMatchObject({ laneField: 'property:Status' });
+    expect(get(root, '.zb-table-wrap').hidden).toBe(true);
+    expect(
+      get(root, 'select[aria-label="Row density"]').closest('.zb-select-chevron'),
+    ).toHaveProperty('hidden', true);
+    openTool(root, 'Lanes');
+    get<HTMLInputElement>(root, 'input[aria-label="Hide empty lanes"]').click();
+    click(root, 'Collapse all lanes');
+    expect(active(host).board?.collapsedLanes).not.toEqual([]);
+    focusedKey('Escape');
+    openTool(root, 'Card fields');
+    expect(root.querySelector('input[data-focus="property:Status"]')).toBeNull();
+    get<HTMLInputElement>(root, 'input[data-focus="year"]').click();
+    expect(active(host).board?.cardFields).not.toContain('year');
+    const savedBoard = active(host).board;
+
+    openTool(root, 'View actions');
+    click(root, 'Switch to table view');
+    expect(active(host)).toMatchObject(base);
+    expect(get(root, '.zb-table-wrap').hidden).toBe(false);
+    openTool(root, 'View actions');
+    click(root, 'Switch to board view');
+    expect(active(host).board).toEqual(savedBoard);
+    expect(active(host).columns).toEqual(base.columns);
+  });
+
+  it('creates an empty board with an actionable property guide and falls back after deletion', async () => {
+    const { host } = fixture([sample], defaultView, []);
+    const { root } = attach(host);
+    await settle();
+    click(root, 'New view');
+    click(root, 'New board view');
+    expect(active(host).layout).toBe('board');
+    const emptyBoard = get(root, '.zb-board');
+    get<HTMLButtonElement>(emptyBoard, 'button').click();
+    expect(get(root, '.zb-popover').getAttribute('aria-label')).toBe('Properties');
+    await host.change({
+      kind: 'define',
+      property: { key: 'Stage', type: 'single-select', options: ['Read'] },
+    });
+    await host.change({ kind: 'define', property: { key: 'Impact', type: 'rating' } });
+    await settle();
+    openTool(root, 'Lanes');
+    expect(get<HTMLSelectElement>(root, 'select[aria-label="Lane field"]').value).toBe(
+      'property:Stage',
+    );
+    await host.change({ kind: 'delete-property', key: 'Stage', clean: false });
+    await settle();
+    expect(get<HTMLSelectElement>(root, 'select[aria-label="Lane field"]').value).toBe(
+      'property:Impact',
+    );
+    expect(emptyBoard.querySelectorAll('.zb-board-lane').length).toBe(6);
+  });
+
+  it('lets only the active board handle card commands, without claiming input and open popovers', async () => {
+    const row = { ...sample, extra: 'Impact: 3' };
+    const view: View = {
+      ...defaultView,
+      layout: 'board',
+      board: {
+        laneField: 'property:Impact',
+        cardFields: [],
+        hideEmptyLanes: false,
+        collapsedLanes: [],
+      },
+    };
+    const { host } = fixture([row], view, researchProperties);
+    const { root } = attach(host);
+    await settle();
+    const card = () => get(root, '.zb-board-card[data-item-id="1"]');
+    const board = get(root, '.zb-board');
+    const search = get<HTMLInputElement>(root, 'input[role="searchbox"]');
+    search.focus();
+    expect(focusedKey('5')).toBe(true);
+    const lanes = get<HTMLButtonElement>(root, 'button[aria-haspopup="dialog"][title="Lanes"]');
+    lanes.click();
+    card().focus();
+    expect(focusedKey('5')).toBe(true);
+    expect(host.setProperty).not.toHaveBeenCalled();
+    expect(focusedKey('Escape')).toBe(false);
+    expect(lanes.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(card());
+    expect(focusedKey('5', { isComposing: true })).toBe(true);
+    expect(focusedKey('5', { repeat: true })).toBe(true);
+    expect(focusedKey(' ')).toBe(true);
+    expect(focusedKey('5')).toBe(false);
+    await settle();
+    expect(host.setProperty).toHaveBeenCalledExactlyOnceWith(1, 'Impact', '5');
+    expect(document.activeElement).toBe(card());
+    expect(focusedKey('Enter')).toBe(false);
+    expect(host.openItem).toHaveBeenLastCalledWith(1, false);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(document.activeElement).toBe(board);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(board.contains(document.activeElement)).toBe(false);
   });
 
   it('keeps the header Columns popover anchored through order, visibility, and default resets', async () => {
@@ -1878,7 +1990,9 @@ describe('Zotero Bases workspace', () => {
   it('creates interactive XHTML elements inside the owning XUL document', async () => {
     const html = 'http://www.w3.org/1999/xhtml';
     const xul = 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul';
-    const xml = document.implementation.createDocument(xul, 'window');
+    const frame = document.body.appendChild(document.createElement('iframe'));
+    const xml = frame.contentDocument!;
+    xml.replaceChild(xml.createElementNS(xul, 'window'), xml.documentElement);
     const root = xml.createElementNS(html, 'main') as HTMLElement;
     xml.documentElement.append(root);
     const { host } = fixture();
@@ -1888,6 +2002,9 @@ describe('Zotero Bases workspace', () => {
     expect(tab.ownerDocument).toBe(xml);
     expect(tab.namespaceURI).toBe(html);
     click(root, '新建视图');
-    expect(active(host).name).toBe('新建视图');
+    click(root, '新建看板视图');
+    expect(active(host)).toMatchObject({ name: '新建视图', layout: 'board' });
+    expect(get(root, '.zb-board-card').ownerDocument).toBe(xml);
+    expect(get(root, '.zb-board-card').namespaceURI).toBe(html);
   });
 });
