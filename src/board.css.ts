@@ -85,7 +85,8 @@ export const boardCSS = String.raw`
   min-block-size: 0;
   align-items: stretch;
   justify-items: center;
-  padding: 0.35em 0.06em;
+  gap: 0.25em;
+  padding: 0.2em 0.06em;
 }
 .zb-workspace .zb-board-lane-label {
   min-width: 0;
