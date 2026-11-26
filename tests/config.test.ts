@@ -148,6 +148,84 @@ describe('Zotero Bases configuration', () => {
     expect(target.settings()).toEqual({ properties: [], views: [presented], active: presented.id });
   });
 
+  it('preserves independent board and table settings when the layout changes', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const board: View = {
+      ...secondView,
+      layout: 'board',
+      board: {
+        laneField: 'property:Removed',
+        cardFields: [],
+        hideEmptyLanes: true,
+        collapsedLanes: ['null', '"Done"'],
+      },
+      density: 'wrap',
+      columnWidths: { title: 320 },
+      frozenCount: 1,
+    };
+    const table: View = { ...board, layout: 'table' };
+    const legacy = { ...secondView, id: 'legacy' };
+    const unconfigured: View = { ...secondView, id: 'unconfigured', layout: 'board' };
+    const noLane: View = {
+      ...secondView,
+      id: 'no-lane',
+      layout: 'board',
+      board: { cardFields: ['year'], hideEmptyLanes: false, collapsedLanes: [] },
+    };
+    for (const current of [board, table, board]) {
+      const views = [current, legacy, unconfigured, noLane];
+      config.writeViews({ views, active: current.id });
+      expect(JSON.parse(raw.get(VIEWS_PREF)!)).toEqual({ views, active: current.id });
+      expect(config.settings()).toEqual({ properties: [], views, active: current.id });
+      expect(decodeSyncSnapshot({ schema: [], views }, validateProperty)).toEqual({
+        schema: [],
+        views,
+      });
+    }
+  });
+
+  it('discards malformed board fields locally without losing the view and rejects them remotely', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty);
+    const board = { cardFields: ['creators'], hideEmptyLanes: false, collapsedLanes: [] };
+    const invalid = [
+      {
+        supplied: { layout: 'kanban', board },
+        kept: { board },
+      },
+      {
+        supplied: { layout: null, board },
+        kept: { board },
+      },
+      ...[
+        null,
+        ['tags'],
+        {},
+        { ...board, laneField: 'title' },
+        { ...board, laneField: 'property:' },
+        { ...board, laneField: null },
+        { ...board, cardFields: ['title', 'property:'] },
+        { ...board, cardFields: ['unrecognizedField'] },
+        { ...board, cardFields: [0] },
+        { ...board, cardFields: 'tags' },
+        { ...board, hideEmptyLanes: 0 },
+        { ...board, collapsedLanes: [null] },
+        { ...board, collapsedLanes: 'null' },
+      ].map((board) => ({ supplied: { layout: 'board', board }, kept: { layout: 'board' } })),
+    ];
+    for (const { supplied, kept } of invalid) {
+      const malformed = { ...secondView, ...supplied };
+      const saved = JSON.stringify({ views: [malformed], active: secondView.id });
+      raw.set(VIEWS_PREF, saved);
+      expect(config.settings().views).toEqual([{ ...secondView, ...kept }]);
+      expect(raw.get(VIEWS_PREF)).toBe(saved);
+      expect(
+        decodeSyncSnapshot({ schema: [], views: [malformed] }, validateProperty),
+      ).toBeUndefined();
+    }
+  });
+
   it('ignores malformed local presentation but rejects it in sync snapshots', () => {
     const { prefs, raw } = preferences();
     const config = createConfig(prefs, () => 'user', validateProperty);

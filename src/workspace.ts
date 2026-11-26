@@ -6,6 +6,7 @@ import {
   NATIVE_COLUMN_DEFINITIONS,
   NATIVE_COLUMNS,
   isNativeColumn,
+  type BoardSettings,
   type BulkChange,
   type Catalog,
   type Column,
@@ -26,7 +27,19 @@ import {
   type View,
   type TagColorRule,
   type WorkspaceHost,
+  type ViewLayout,
 } from './contracts';
+import { createBoard } from './board';
+import { createBoardCards } from './board-cards';
+import { boardCardsCSS } from './board-cards.css';
+import { boardCSS } from './board.css';
+import {
+  boardCardFields,
+  boardLaneProperty,
+  boardLanes,
+  defaultBoardSettings,
+  laneProperties,
+} from './board-model';
 import { createCellRenderers, optionTone } from './cell-renderers';
 import { scopeCustomCSS } from './custom-css';
 import { createFieldIcon } from './field-icons';
@@ -81,6 +94,22 @@ const words = {
   views: ['Views', '视图'],
   defaultView: ['Default', '默认视图'],
   newView: ['New view', '新建视图'],
+  newTable: ['New table view', '新建表格视图'],
+  newBoard: ['New board view', '新建看板视图'],
+  switchToTable: ['Switch to table view', '切换为表格视图'],
+  switchToBoard: ['Switch to board view', '切换为看板视图'],
+  lanes: ['Lanes', '泳道'],
+  laneField: ['Lane field', '泳道字段'],
+  cardFields: ['Card fields', '卡片字段'],
+  searchCardFields: ['Search card fields', '搜索卡片字段'],
+  noCardFieldMatches: ['No matching card fields', '没有匹配的卡片字段'],
+  hideEmptyLanes: ['Hide empty lanes', '隐藏空泳道'],
+  expandLanes: ['Expand all lanes', '展开全部泳道'],
+  collapseLanes: ['Collapse all lanes', '折叠全部泳道'],
+  boardKeyboardHint: [
+    'h/l Lanes · j/k Cards · Shift+h/l Move card · 1–5 / 0 Rate / clear · Enter Locate · o PDF',
+    'h/l 换泳道 · j/k 换卡片 · Shift+h/l 移卡 · 1–5／0 评分／清空 · Enter 定位 · o 打开 PDF',
+  ],
   copyView: ['Copy view', '复制视图'],
   renameView: ['Rename view', '重命名视图'],
   deleteView: ['Delete view', '删除视图'],
@@ -394,6 +423,8 @@ function mountWorkspaceSurface(
   let editorKey: ((event: KeyboardEvent) => boolean) | undefined;
   let updateEditorColors: (() => void) | undefined;
   let positionEditor: (() => void) | undefined;
+  let renderedCardFields: readonly Column[] = [];
+  let cardRevision = 0;
   const keyTarget: EventTarget = window ?? root;
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
@@ -520,7 +551,7 @@ function mountWorkspaceSurface(
   }
 
   const style = element('style');
-  style.textContent = workspaceCSS + popoverCSS;
+  style.textContent = workspaceCSS + popoverCSS + boardCSS + boardCardsCSS;
   const customStyle = element('style');
   const surface = element('section', 'zb-workspace');
   surface.lang = options.language;
@@ -564,7 +595,8 @@ function mountWorkspaceSurface(
   const viewActionsTrigger = tool(t('viewActions'), actions, '⋯', 'zb-tool-icon');
   const renameSlot = element('div');
   renameSlot.hidden = true;
-  const addViewButton = button('+', () => createView(false), 'zb-tool-icon', t('newView'));
+  const newViewPane = createPane(t('newView'), 'zb-view-action-list');
+  const addViewButton = tool(t('newView'), newViewPane, '+', 'zb-tool-icon');
   const viewAction = (label: string, run: () => void, className?: string) =>
     button(
       label,
@@ -574,11 +606,17 @@ function mountWorkspaceSurface(
       },
       className,
     );
+  newViewPane.append(
+    viewAction(t('newTable'), () => createView(false, 'table')),
+    viewAction(t('newBoard'), () => createView(false, 'board')),
+  );
+  const layoutAction = viewAction(t('switchToBoard'), switchLayout);
   const copyViewButton = viewAction(t('copyView'), () => createView(true));
   const renameViewButton = viewAction(t('renameView'), startViewRename);
   const deleteViewButton = viewAction(t('deleteView'), deleteView, 'zb-danger');
   actions.append(
     viewAction(t('viewSettings'), showColumns),
+    layoutAction,
     copyViewButton,
     renameViewButton,
     deleteViewButton,
@@ -601,6 +639,7 @@ function mountWorkspaceSurface(
   const sortPane = createPane(t('sort'));
   const filterPane = createPane(t('filters'));
   const groupPane = createPane(t('grouping'));
+  const lanePane = createPane(t('lanes'));
   const columnPane = createPane(t('columns'), 'zb-column-pane');
   const columnSearch = input(t('searchColumns'));
   columnSearch.type = 'search';
@@ -613,6 +652,7 @@ function mountWorkspaceSurface(
   const sortTool = tool(t('sort'), sortPane);
   const filterTool = tool(t('filters'), filterPane);
   const groupTool = tool(t('grouping'), groupPane);
+  const laneTool = tool(t('lanes'), lanePane);
   const columnTool = tool(t('columns'), columnPane);
   columnTool.addEventListener('click', () => {
     columnsFromTail = false;
@@ -628,6 +668,7 @@ function mountWorkspaceSurface(
     activeView().density ?? 'compact',
   );
   density.addEventListener('change', () => updateView({ density: density.value as Density }));
+  const densityControl = withChevron(density);
   const searchField = element('div', 'zb-search');
   searchField.id = `${mountId}-search`;
   const searchToggle = button(
@@ -685,9 +726,10 @@ function mountWorkspaceSurface(
     sortTool,
     filterTool,
     groupTool,
+    laneTool,
     columnTool,
     propertyTool,
-    withChevron(density),
+    densityControl,
     retry,
     searchField,
   );
@@ -703,6 +745,37 @@ function mountWorkspaceSurface(
   const tableWrap = element('div', 'zb-table-wrap');
   tableWrap.tabIndex = 0;
   tableWrap.setAttribute('aria-label', t('table'));
+  const boardRoot = element('div', 'zb-board');
+  const board = createBoard(boardRoot, {
+    language: options.language,
+    card: (row, card) => boardCards.render(card, row, renderedCardFields, preferences.properties),
+    toggle: toggleLane,
+    async write(row, property, value) {
+      showStatus('');
+      try {
+        await host.setProperty(row.id, property.key, value);
+      } catch (error) {
+        showStatus(t('actionError'), true);
+        refresh();
+        throw error;
+      }
+    },
+    open: openRow,
+    properties() {
+      openPane(propertyTool, propertyPane);
+    },
+  });
+  const boardCards = createBoardCards(doc, {
+    text: t,
+    columnName,
+    authorFormat: () => globals.authorFormat,
+    tagColor: (row, label) => tagColor(row, label),
+    linkActions: options.linkActions,
+    open: openRow,
+    rate(row, property, value) {
+      void board.rate(row, property, value).catch(() => {});
+    },
+  });
   const tableStatus = element('div', 'zb-table-status');
   const tagValues = element('datalist');
   tagValues.id = `${mountId}-filter-tags`;
@@ -712,12 +785,13 @@ function mountWorkspaceSurface(
   tableStatus.append(count, keyHints);
   const rowProbe = element('span', 'zb-row-probe');
   rowProbe.setAttribute('aria-hidden', 'true');
-  panel.append(toolbar, warning, bulkBar, status, tableWrap, tableStatus);
+  panel.append(toolbar, warning, bulkBar, status, tableWrap, boardRoot, tableStatus);
   surface.append(top, panel, tagValues, rowProbe);
   root.append(style, customStyle, surface);
   updateAppearance();
   syncSearchMode();
   narrowWindow?.addEventListener('change', syncSearchMode);
+  syncLayout();
   syncDensity();
   search.addEventListener('compositionstart', () => {
     composingSearch = true;
@@ -812,7 +886,10 @@ function mountWorkspaceSurface(
       surface.dataset.authorFormat = next.authorFormat;
       recycleEditor?.();
       resetMeasurements = true;
-      renderTable();
+      if (isBoard()) {
+        cardRevision++;
+        renderBoard();
+      } else renderTable();
     } else if (previous.appearance !== next.appearance || previous.customCSS !== next.customCSS) {
       widthGeometryChanged();
     }
@@ -898,7 +975,13 @@ function mountWorkspaceSurface(
         return;
       }
     }
-    gridKeys(event, target);
+    if (isBoard()) {
+      if (globals.keyboardFlow && !popovers.isOpen() && board.key(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    } else gridKeys(event, target);
     workspaceKeys(event);
     if (event.defaultPrevented) event.stopPropagation();
   }
@@ -964,6 +1047,43 @@ function mountWorkspaceSurface(
     return preferences.views.find((view) => view.id === preferences.active)!;
   }
 
+  function isBoard(view = activeView()): boolean {
+    return view.layout === 'board';
+  }
+
+  function currentBoard(): BoardSettings {
+    return activeView().board ?? defaultBoardSettings(preferences.properties);
+  }
+
+  function updateBoard(change: Partial<BoardSettings>): void {
+    updateView({ board: { ...currentBoard(), ...change } });
+  }
+
+  function switchLayout(): void {
+    const view = activeView();
+    if (isBoard(view)) updateView({ layout: 'table' });
+    else updateView({ layout: 'board', board: currentBoard() });
+  }
+
+  function syncLayout(): void {
+    const enabled = isBoard();
+    surface.dataset.layout = enabled ? 'board' : 'table';
+    layoutAction.textContent = t(enabled ? 'switchToTable' : 'switchToBoard');
+    const fields = t(enabled ? 'cardFields' : 'columns');
+    const fieldSearch = t(enabled ? 'searchCardFields' : 'searchColumns');
+    columnTool.textContent = fields;
+    named(columnTool, fields);
+    columnPane.setAttribute('aria-label', fields);
+    named(columnSearch, fieldSearch);
+    columnSearch.placeholder = fieldSearch;
+    groupTool.hidden = enabled;
+    laneTool.hidden = !enabled;
+    densityControl.hidden = enabled;
+    tableWrap.hidden = enabled;
+    boardRoot.hidden = !enabled;
+    keyHints.textContent = t(enabled ? 'boardKeyboardHint' : 'keyboardHint');
+  }
+
   function showStatus(message: string, error = false): void {
     if (disposed) return;
     status.hidden = !message;
@@ -1014,7 +1134,10 @@ function mountWorkspaceSurface(
     if (changedTagColors) {
       tagColor = resolveTagColors(preferences.tagColors);
       if (popovers.isOpen(tagColorPane)) refreshTagColorPane();
-      repaintPills('tags');
+      if (isBoard()) {
+        cardRevision++;
+        if (!changedProperties && !changedViews) renderBoard();
+      } else repaintPills('tags');
     }
     if (!changedProperties && !changedViews) return;
     if (changedProperties && closeEditor) {
@@ -1022,6 +1145,13 @@ function mountWorkspaceSurface(
       updateEditorColors?.();
     }
     const view = activeView();
+    const boardLayout = isBoard(view);
+    const changedLayout = isBoard(previousView) !== boardLayout;
+    const changedBoard = boardLayout && !same(previousView.board, view.board);
+    const changedBoardFields =
+      changedBoard &&
+      (previousView.board?.laneField !== view.board?.laneField ||
+        !same(previousView.board?.cardFields, view.board?.cardFields));
     const changedActive = previousView.id !== view.id;
     const changedScope = previousView.scope !== view.scope;
     const changedColumns = !same(previousView.columns, view.columns);
@@ -1044,14 +1174,22 @@ function mountWorkspaceSurface(
     ) {
       foldedGroups.clear();
     }
-    if (changedActive || changedScope || changedFilters) clearSelection();
+    if (changedActive || changedScope || changedFilters || changedLayout) clearSelection();
+    if ((changedActive || changedScope || changedLayout) && isBoard(previousView)) board.clear();
+    if (changedLayout) {
+      popovers.close(false);
+      tableKeys.reset();
+      syncLayout();
+    }
     if (changedActive) {
       stopViewRename();
       popovers.close(false);
     }
-    if (changedActive || changedDensity) syncDensity();
-    if (changedActive || changedWidths) updateTableWidths();
-    if (previousView.frozenCount !== view.frozenCount) updateFrozenColumns();
+    if (!boardLayout) {
+      if (changedActive || changedDensity || changedLayout) syncDensity();
+      if (changedActive || changedWidths) updateTableWidths();
+      if (previousView.frozenCount !== view.frozenCount) updateFrozenColumns();
+    }
     if (changedViews) renderTabs();
     if (changedScope || changedActive) renderScope();
     if (changedProperties) {
@@ -1059,13 +1197,23 @@ function mountWorkspaceSurface(
       renderBulkProperty();
       updatePropertyHint();
     }
-    if (changedColumns || changedProperties || changedActive) renderColumns();
+    if (changedProperties || changedBoardFields) cardRevision++;
+    if (changedColumns || changedProperties || changedActive || changedLayout || changedBoardFields)
+      renderColumns();
+    if (boardLayout && (changedBoard || changedProperties || changedActive || changedLayout))
+      renderLanes();
     if (changedSort || changedProperties || changedActive) renderSort();
     if (changedColumns || changedProperties) resetMeasurements = true;
     if (changedProperties || changedActive || (changedFilters && !keepFilterInput)) renderFilters();
     if (changedProperties || changedActive || changedScope || changedGrouping) renderGrouping();
-    const reset = changedActive || changedScope || changedSort || changedFilters || changedGrouping;
-    if (changedActive || changedScope || changedColumns) recycleEditor?.();
+    const reset =
+      changedActive ||
+      changedScope ||
+      changedSort ||
+      changedFilters ||
+      changedGrouping ||
+      changedLayout;
+    if (changedActive || changedScope || changedColumns || changedLayout) recycleEditor?.();
     if (changedActive || changedScope) activeCell = undefined;
     if (reset) tableWrap.scrollTop = 0;
     if (changedScope) {
@@ -1076,9 +1224,13 @@ function mountWorkspaceSurface(
       changedColumns ||
       changedSort ||
       changedFilters ||
-      changedGrouping
+      changedGrouping ||
+      changedLayout ||
+      changedBoardFields
     ) {
       evaluate(reset);
+    } else if (boardLayout && (changedBoard || changedTagColors)) {
+      renderBoard();
     }
   }
 
@@ -1123,7 +1275,7 @@ function mountWorkspaceSurface(
       : view.name;
   }
 
-  function createView(copy: boolean): void {
+  function createView(copy: boolean, viewLayout: ViewLayout = 'table'): void {
     const source = activeView();
     const name = copy ? `${displayViewName(source)} (${t('copySuffix')})` : t('newView');
     let unique = name;
@@ -1149,6 +1301,9 @@ function mountWorkspaceSurface(
           filters: [],
           density: globals.defaultDensity,
           frozenCount: 1,
+          ...(viewLayout === 'board'
+            ? { layout: viewLayout, board: defaultBoardSettings(preferences.properties) }
+            : {}),
         };
     saveViews([...preferences.views, view], id);
   }
@@ -1288,6 +1443,65 @@ function mountWorkspaceSurface(
     });
   }
 
+  function reorderCardFields(visible: readonly Column[]): void {
+    const settings = currentBoard();
+    const editable = new Set(boardCardFields(settings, preferences.properties));
+    let index = 0;
+    updateBoard({
+      cardFields: settings.cardFields.map((column) =>
+        editable.has(column) ? visible[index++]! : column,
+      ),
+    });
+  }
+
+  function renderLanes(): void {
+    preserveFocus(lanePane, () => {
+      const settings = currentBoard();
+      const properties = laneProperties(preferences.properties);
+      const property = boardLaneProperty(settings, preferences.properties);
+      const fields = properties.map(({ key }) => [`property:${key}`, key] as const);
+      const picker = select(t('laneField'), fields, property ? `property:${property.key}` : '');
+      picker.disabled = !fields.length;
+      focusKey(picker, 'lane-field');
+      picker.addEventListener('change', () => {
+        const field = fields.find(([key]) => key === picker.value)?.[0];
+        if (field) updateBoard({ laneField: field, collapsedLanes: [] });
+      });
+      const hide = input(t('hideEmptyLanes'));
+      hide.type = 'checkbox';
+      hide.checked = settings.hideEmptyLanes;
+      focusKey(hide, 'hide-empty');
+      hide.addEventListener('change', () => updateBoard({ hideEmptyLanes: hide.checked }));
+      const hideLabel = element('label', 'zb-line');
+      hideLabel.append(hide, t('hideEmptyLanes'));
+      const expand = button(t('expandLanes'), () => updateBoard({ collapsedLanes: [] }));
+      const collapse = button(t('collapseLanes'), () => {
+        if (!property) return;
+        const lanes = boardLanes(result?.rows ?? [], property, {
+          ...settings,
+          hideEmptyLanes: false,
+        });
+        updateBoard({ collapsedLanes: lanes.map(({ id }) => id) });
+      });
+      expand.disabled = !property;
+      collapse.disabled = !property;
+      focusKey(expand, 'expand-lanes');
+      focusKey(collapse, 'collapse-lanes');
+      const controls = element('div', 'zb-line');
+      controls.append(expand, collapse);
+      lanePane.replaceChildren(withChevron(picker), hideLabel, controls);
+    });
+  }
+
+  function toggleLane(id: string): void {
+    const { collapsedLanes } = currentBoard();
+    updateBoard({
+      collapsedLanes: collapsedLanes.includes(id)
+        ? collapsedLanes.filter((lane) => lane !== id)
+        : [...collapsedLanes, id],
+    });
+  }
+
   function moveButton(
     label: string,
     arrow: string,
@@ -1304,8 +1518,26 @@ function mountWorkspaceSurface(
     preserveFocus(
       columnList,
       () => {
-        const visible = visibleColumns();
-        const defaults = allColumns();
+        const boardLayout = isBoard();
+        const settings = boardLayout ? currentBoard() : undefined;
+        const lane = settings && boardLaneProperty(settings, preferences.properties);
+        const visible = settings
+          ? boardCardFields(settings, preferences.properties)
+          : visibleColumns();
+        const defaults = allColumns().filter(
+          (column) => !settings || (column !== 'title' && column !== `property:${lane?.key}`),
+        );
+        const reorder = settings ? reorderCardFields : reorderColumns;
+        const move = (column: Column, index: number, to: number) => {
+          if (!settings) {
+            moveColumn(column, to);
+            return;
+          }
+          const fields = [...visible];
+          fields.splice(index, 1);
+          fields.splice(to, 0, column);
+          reorderCardFields(fields);
+        };
         const ordered = new Map(visible.map((column, index) => [column, index]));
         const term = columnSearch.value.trim().normalize('NFC').toLowerCase();
         const matches = (label: string) => label.normalize('NFC').toLowerCase().includes(term);
@@ -1366,9 +1598,19 @@ function mountWorkspaceSurface(
             const check = element('input');
             check.type = 'checkbox';
             check.checked = index !== undefined;
-            check.disabled = check.checked && visible.length === 1;
+            check.disabled = !settings && check.checked && visible.length === 1;
             focusKey(check, column);
-            check.addEventListener('change', () => showColumn(column, check.checked));
+            check.addEventListener('change', () => {
+              if (!settings) showColumn(column, check.checked);
+              else {
+                const fields = currentBoard().cardFields;
+                updateBoard({
+                  cardFields: check.checked
+                    ? [...fields, column]
+                    : fields.filter((field) => field !== column),
+                });
+              }
+            });
             label.append(check, createFieldIcon(doc, column, propertyFor(column)?.type), caption);
             if (index !== undefined) {
               const rank = element('span', 'zb-column-position', `#${index + 1}`);
@@ -1378,10 +1620,10 @@ function mountWorkspaceSurface(
             row.append(label);
             if (index !== undefined) {
               const up = moveButton(t('moveUp'), '↑', caption, index > 0, () =>
-                moveColumn(column, index - 1),
+                move(column, index, index - 1),
               );
               const down = moveButton(t('moveDown'), '↓', caption, index + 1 < visible.length, () =>
-                moveColumn(column, index + 1),
+                move(column, index, index + 1),
               );
               focusKey(up, `up:${column}`);
               focusKey(down, `down:${column}`);
@@ -1392,11 +1634,27 @@ function mountWorkspaceSurface(
           section.append(list);
           sections.push(section);
         }
-        const defaultOrder = defaults.filter((column) => ordered.has(column));
-        const reset = button(t('resetOrder'), () => reorderColumns(defaultOrder));
+        const defaultOrder = (
+          settings
+            ? [
+                ...new Set([
+                  ...defaultBoardSettings(preferences.properties).cardFields,
+                  ...defaults,
+                ]),
+              ]
+            : defaults
+        ).filter((column) => ordered.has(column));
+        const reset = button(t('resetOrder'), () => reorder(defaultOrder));
         focusKey(reset, 'reset-order');
         reset.disabled = same(visible, defaultOrder);
-        if (!sections.length) sections.push(element('p', 'zb-column-empty', t('noColumnMatches')));
+        if (!sections.length)
+          sections.push(
+            element(
+              'p',
+              'zb-column-empty',
+              t(boardLayout ? 'noCardFieldMatches' : 'noColumnMatches'),
+            ),
+          );
         columnList.replaceChildren(...sections, reset);
       },
       columnPane,
@@ -2462,6 +2720,7 @@ function mountWorkspaceSurface(
     if (selected.size) parts.push(selectionCount.textContent);
     const summary = parts.join(' · ');
     if (count.textContent !== summary) count.textContent = summary;
+    if (tableWrap.hidden) return;
     const header = tableWrap.querySelector<HTMLInputElement>('[data-select-all]');
     if (header) {
       header.disabled = !total;
@@ -2540,7 +2799,7 @@ function mountWorkspaceSurface(
       () => {
         if (disposed || ticket !== loadTicket) return;
         retry.hidden = false;
-        if (catalog) showStatus(t('loadError'), true);
+        if (catalog || isBoard()) showStatus(t('loadError'), true);
         evaluate();
       },
     );
@@ -2552,7 +2811,7 @@ function mountWorkspaceSurface(
       ? queryCatalog(catalog, view, preferences.properties, options.language, searchTerm)
       : undefined;
     groups =
-      result && view.group && catalog
+      !isBoard(view) && result && view.group && catalog
         ? groupRows(
             result.rows,
             view.group,
@@ -2563,7 +2822,7 @@ function mountWorkspaceSurface(
           )
         : undefined;
     const invalid = result?.invalid.length ?? 0;
-    const invalidGroup = Boolean(result && view.group && !groups);
+    const invalidGroup = !isBoard(view) && Boolean(result && view.group && !groups);
     updateBadge(
       sortTool,
       t('sort'),
@@ -2577,8 +2836,33 @@ function mountWorkspaceSurface(
     groupWarning.hidden = !invalidGroup;
     groupWarningText.textContent = invalidGroup ? t('invalidGrouping') : '';
     if (result) retainSelection(result.rows);
-    if (!closeEditor) renderTable(resetScroll);
+    if (isBoard(view)) renderBoard();
+    else if (!closeEditor) renderTable(resetScroll);
     else syncSelection();
+  }
+
+  function renderBoard(): void {
+    const settings = currentBoard();
+    const property = boardLaneProperty(settings, preferences.properties);
+    renderedCardFields = boardCardFields(settings, preferences.properties);
+    let rating = property?.type === 'rating' ? property : undefined;
+    if (!rating) {
+      for (const column of renderedCardFields) {
+        const field = propertyFor(column);
+        if (field?.type !== 'rating') continue;
+        rating = field;
+        break;
+      }
+    }
+    board.render({
+      viewID: activeView().id,
+      property,
+      rating,
+      lanes: property && result ? boardLanes(result.rows, property, settings) : [],
+      loading: !result && retry.hidden,
+      cardRevision,
+    });
+    syncSelection();
   }
 
   function renderTable(resetScroll = false): void {
@@ -2845,7 +3129,7 @@ function mountWorkspaceSurface(
   }
 
   function scheduleWindow(): void {
-    if (disposed || !tableBody || virtualFrame !== undefined) return;
+    if (disposed || tableWrap.hidden || !tableBody || virtualFrame !== undefined) return;
     if (!window) {
       renderWindow();
       return;
@@ -2862,7 +3146,7 @@ function mountWorkspaceSurface(
   }
 
   function renderWindow(wantedTop?: number): void {
-    if (disposed || !tableBody) return;
+    if (disposed || tableWrap.hidden || !tableBody) return;
     const { body, leading, trailing, columns } = tableBody;
     const height = viewportHeight();
     const initial = Math.min(
@@ -3854,6 +4138,7 @@ function mountWorkspaceSurface(
   renderSort();
   renderFilters();
   renderGrouping();
+  if (isBoard()) renderLanes();
   renderProperties();
   const unsubscribe = host.subscribe((kind) => {
     if (disposed) return;
@@ -3873,6 +4158,7 @@ function mountWorkspaceSurface(
     disposed = true;
     unsubscribe();
     disposeSync?.();
+    board.dispose();
     popovers.dispose();
     keyTarget.removeEventListener('keydown', captureKeys as EventListener, true);
     narrowWindow?.removeEventListener('change', syncSearchMode);

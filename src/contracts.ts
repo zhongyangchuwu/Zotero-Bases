@@ -230,6 +230,15 @@ export type Grouping =
   | { readonly column: 'tags'; readonly tag: string; readonly direction: Direction }
   | { readonly column: 'collections'; readonly collection: string; readonly direction: Direction };
 
+export type ViewLayout = 'table' | 'board';
+
+export interface BoardSettings {
+  readonly laneField?: `property:${string}`;
+  readonly cardFields: readonly Column[];
+  readonly hideEmptyLanes: boolean;
+  readonly collapsedLanes: readonly string[];
+}
+
 export interface View {
   readonly id: string;
   readonly name: string;
@@ -241,6 +250,8 @@ export interface View {
   readonly density?: Density;
   readonly columnWidths?: Readonly<Partial<Record<Column, number>>>;
   readonly frozenCount?: number;
+  readonly layout?: ViewLayout;
+  readonly board?: BoardSettings;
 }
 
 export interface Scope {
@@ -253,6 +264,7 @@ export type AttachmentKind = 'pdf' | 'epub' | 'snapshot' | 'file';
 export interface Row
   extends Readonly<Partial<Record<Exclude<NativeColumn, 'tags' | 'pdf' | 'collections'>, string>>> {
   readonly id: number;
+  readonly itemKey?: string;
   readonly writable: boolean;
   readonly title: string;
   readonly creators: string;

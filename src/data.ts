@@ -33,6 +33,7 @@ type ItemData = 'itemData' | 'creators' | 'tags' | 'childItems' | 'collections';
 
 interface NativeItem {
   readonly id: number;
+  readonly key?: string;
   readonly libraryID: number;
   readonly itemTypeID: number;
   readonly parentID: number | false | null;
@@ -496,6 +497,7 @@ export function createWorkspaceHost(
       rows.push({
         ...bibliography,
         id: item.id,
+        itemKey: item.key,
         writable: writable(item),
         title: bibliography.title ?? '',
         creators: item

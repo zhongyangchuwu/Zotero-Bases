@@ -50,10 +50,19 @@ export interface CellActions {
   ): string;
 }
 
-interface Cell {
+type ValueActions = Pick<
+  CellActions,
+  'tagColor' | 'linkActions' | 'authorFormat' | 'rate' | 'columnName' | 'text'
+>;
+
+interface Field {
   readonly row: Row;
   readonly column: Column;
   readonly value: PropertyValue;
+  readonly cell: HTMLElement;
+}
+
+interface Cell extends Field {
   readonly cell: HTMLTableCellElement;
 }
 
@@ -208,7 +217,7 @@ function publicationDate(value: string): string {
   return original && !/^\d{1,2}:\d{2}/u.test(original) ? original : value;
 }
 
-export function createCellRenderers(document: Document, actions: CellActions) {
+function createValueRenderers(document: Document, actions: ValueActions, card = false) {
   function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
     className = '',
@@ -233,10 +242,302 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     return row.title || actions.text('untitled');
   }
 
-  function control(node: HTMLElement, { row, column }: Cell): void {
+  function control(node: HTMLElement, { row, column }: Field): void {
     node.dataset.column = column;
     node.dataset.focus = `cell:${row.id}:${column}`;
   }
+
+  function named(node: HTMLElement, label: string): void {
+    node.setAttribute('aria-label', label);
+    node.title = label;
+  }
+
+  function plain({ cell, value }: Field): void {
+    cell.textContent = valueText(value);
+    if (typeof value === 'string') cell.title = value;
+  }
+
+  function paintPillColor(
+    row: Row,
+    column: Column,
+    property: Property | undefined,
+    pill: HTMLElement,
+    label: string,
+  ): void {
+    let tone: OptionColorKey | undefined;
+    if (column === 'tags') {
+      const tagColor = actions.tagColor?.(row, label);
+      if (tagColor?.native && HEX_COLOR.test(tagColor.native)) {
+        pill.style.setProperty(NATIVE_TAG_COLOR, tagColor.native);
+      } else {
+        if (pill.style.length) pill.style.removeProperty(NATIVE_TAG_COLOR);
+        tone = tagColor?.tone;
+      }
+    } else if (property) {
+      tone = optionTone(property, label);
+    }
+    if (tone) pill.dataset.tone = tone;
+    else delete pill.dataset.tone;
+  }
+
+  function pillStrip(
+    { row, column }: Field,
+    pills: readonly string[],
+    property?: Property,
+    fullTitle?: string,
+  ): HTMLElement {
+    const strip = element('span', 'zb-cell-pills');
+    if (fullTitle) strip.title = fullTitle;
+    for (const label of pills) {
+      const pill = element('span', 'zb-cell-pill', label);
+      if (fullTitle) pill.title = label;
+      if (property || column === 'tags') paintPillColor(row, column, property, pill, label);
+      strip.append(pill);
+    }
+    if (!card) {
+      const more = element('span', 'zb-cell-pill zb-cell-pill-more');
+      if (fullTitle) more.title = fullTitle;
+      more.hidden = true;
+      strip.append(more);
+    }
+    return strip;
+  }
+
+  function creators({ cell, row }: Field): void {
+    const full = row.creators;
+    const first = full.indexOf('; ');
+    cell.textContent =
+      actions.authorFormat?.() !== 'singleLine' &&
+      first !== -1 &&
+      full.indexOf('; ', first + 2) !== -1
+        ? `${full.slice(0, first)} et al.`
+        : valueText(full);
+    cell.title = full;
+  }
+
+  function typeBadge(context: Field): void {
+    const { cell, row, value } = context;
+    if (typeof value !== 'string' || !value) return plain(context);
+    const badge = element('span', 'zb-type-badge');
+    if (row.itemType) {
+      badge.dataset.itemType = row.itemType;
+      badge.append(createItemTypeIcon(document, row.itemType));
+    }
+    badge.append(element('span', 'zb-type-label', value));
+    cell.append(badge);
+    cell.title = value;
+  }
+
+  function nativeNumber(context: Field): void {
+    const { cell, column, value } = context;
+    cell.classList.add('zb-cell-number');
+    if (!card && value === '0' && (column === 'notesCount' || column === 'attachmentsCount'))
+      return;
+    plain(context);
+  }
+
+  function nativeDate({ cell, column, value }: Field): void {
+    if (typeof value !== 'string') return;
+    cell.classList.add('zb-cell-date');
+    cell.textContent = (column === 'date' ? undefined : dateDay(value)) ?? publicationDate(value);
+    cell.title = value;
+  }
+
+  function nativeList(context: Field): void {
+    const { cell, value } = context;
+    if (value === null || typeof value !== 'object' || !value.length) return;
+    cell.classList.add('zb-cell-collections');
+    cell.append(pillStrip(context, value, undefined, value.join('; ')));
+  }
+
+  function linkButton(
+    style: string,
+    text: string,
+    label: string,
+    run: () => void,
+  ): HTMLButtonElement {
+    const node = element('button', `zb-link-control ${style}`, text);
+    node.type = 'button';
+    if (!card) node.tabIndex = -1;
+    named(node, label);
+    node.addEventListener('click', run);
+    node.addEventListener('dblclick', (event) => event.stopPropagation());
+    return node;
+  }
+
+  function nativeLink(context: Field): void {
+    const { cell, column, value } = context;
+    const linkActions = actions.linkActions;
+    if (typeof value !== 'string' || !value || !linkActions) return plain(context);
+    const doi = column === 'doi' ? doiLink(value) : undefined;
+    const url = column === 'doi' ? doi?.url : webURL(value)?.href;
+    if (!url) return plain(context);
+    const text = doi?.doi ?? value;
+    const open = linkButton('zb-link-open', text, `${actions.text('openLink')} · ${text}`, () =>
+      linkActions.open(url),
+    );
+    control(open, context);
+    cell.append(open);
+    if (doi) {
+      const copy = linkButton('zb-link-copy', '⧉', `${actions.text('copyDOI')} · ${doi.doi}`, () =>
+        linkActions.copy(doi.doi),
+      );
+      if (card) copy.dataset.focus = `${open.dataset.focus}:copy`;
+      cell.append(copy);
+    }
+  }
+
+  function rating(context: Field, property: Property): void {
+    const { row, column, value, cell } = context;
+    let current = typeof value === 'string' && isRating(value) ? Number(value) : 0;
+    const rate = row.writable ? actions.rate : undefined;
+    const group = element('span', 'zb-rating');
+    const ratingLabel = actions.text('rating');
+    const label = `${ratingLabel} · ${actions.columnName(column)} · ${rowName(row)}`;
+    group.setAttribute('role', rate ? 'group' : 'img');
+    group.setAttribute(
+      'aria-label',
+      rate ? label : `${label}: ${current}/5 · ${actions.text('readOnly')}`,
+    );
+    for (let index = 1; index <= 5; index++) {
+      const button = rate ? element('button', 'zb-rating-star') : undefined;
+      const star = button ?? element('span', 'zb-rating-star');
+      const icon = createFieldIcon(document, column, 'rating');
+      icon.classList.replace('zb-field-icon', 'zb-rating-icon');
+      star.append(icon);
+      if (rate && button) {
+        button.type = 'button';
+        if (!card) button.tabIndex = -1;
+        control(button, context);
+        button.dataset.focus += `:${index}`;
+        button.dataset.rating = String(index);
+        button.setAttribute('aria-label', `${ratingLabel} · ${index}/5`);
+        button.addEventListener('click', () => {
+          if (card) {
+            const pending = cell.closest<HTMLElement>('.zb-board-card[data-pending]');
+            if (pending && pending.dataset.pendingRating !== property.key) return;
+          }
+          current = current === index ? 0 : index;
+          // A second click can arrive before the saved value is painted by the host.
+          paint();
+          rate(row, property, current === 0 ? null : String(current));
+        });
+      }
+      group.append(star);
+    }
+    function paint(): void {
+      group.toggleAttribute('data-empty', current === 0);
+      for (let i = 0; i < group.children.length; i++) {
+        const star = group.children[i] as HTMLElement;
+        star.toggleAttribute('data-filled', i < current);
+        if (rate) {
+          const pressed = i + 1 === current;
+          star.setAttribute('aria-pressed', String(pressed));
+          star.title = pressed ? actions.text('clearRating') : star.getAttribute('aria-label')!;
+        }
+      }
+    }
+    paint();
+    cell.classList.add('zb-rating-cell');
+    cell.append(group);
+  }
+
+  function propertyURLValue(context: Field): void {
+    const { value, cell } = context;
+    const text = typeof value === 'string' ? value : '';
+    const url = webURL(text);
+    const compact = url ? `${url.host}${url.pathname === '/' ? '' : url.pathname}` : text;
+    const linkActions = actions.linkActions;
+    cell.classList.add('zb-cell-url');
+    if (url && linkActions) {
+      const open = linkButton(
+        'zb-link-open zb-url-value',
+        compact,
+        `${actions.text('openLink')} · ${text}`,
+        () => linkActions.open(url.href),
+      );
+      control(open, context);
+      cell.append(open);
+    } else if (text) {
+      const label = element('span', 'zb-url-value', compact);
+      label.title = text;
+      cell.append(label);
+    }
+  }
+
+  const byType: Record<NativeValueType, (context: Field) => void> = {
+    text: plain,
+    number: nativeNumber,
+    date: nativeDate,
+    link: nativeLink,
+    multi: nativeList,
+    boolean: plain,
+  };
+
+  function nativeValue(context: Field, column: NativeColumn): void {
+    if (column === 'creators') creators(context);
+    else if (column === 'type') typeBadge(context);
+    else byType[NATIVE_COLUMN_BY_KEY[column].valueType](context);
+  }
+
+  return {
+    element,
+    valueText,
+    rowName,
+    control,
+    named,
+    plain,
+    paintPillColor,
+    pillStrip,
+    nativeValue,
+    rating,
+    propertyURLValue,
+  };
+}
+
+export function createBoardFieldRenderer(document: Document, actions: ValueActions) {
+  const { nativeValue, pillStrip, plain, propertyURLValue, rating } = createValueRenderers(
+    document,
+    actions,
+    true,
+  );
+  return (
+    cell: HTMLElement,
+    row: Row,
+    column: Column,
+    property: Property | undefined,
+    value: PropertyValue,
+  ): void => {
+    const field: Field = { cell, row, column, value };
+    if (property?.type === 'rating') rating(field, property);
+    else if (property?.type === 'url') propertyURLValue(field);
+    else if (
+      column === 'tags' ||
+      property?.type === 'multi-select' ||
+      property?.type === 'single-select'
+    ) {
+      const choices = typeof value === 'string' ? [value] : value;
+      if (choices && typeof choices === 'object' && choices.length)
+        cell.append(pillStrip(field, choices, property));
+    } else if (isNativeColumn(column)) nativeValue(field, column);
+    else plain(field);
+  };
+}
+
+export function createCellRenderers(document: Document, actions: CellActions) {
+  const {
+    element,
+    valueText,
+    rowName,
+    control,
+    named,
+    plain,
+    paintPillColor,
+    pillStrip,
+    nativeValue,
+    rating,
+    propertyURLValue,
+  } = createValueRenderers(document, actions);
 
   function button(context: Cell, run: () => void, extraClass = ''): HTMLButtonElement {
     const node = element('button', extraClass ? `zb-cell-button ${extraClass}` : 'zb-cell-button');
@@ -246,18 +547,8 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     return node;
   }
 
-  function named(node: HTMLElement, label: string): void {
-    node.setAttribute('aria-label', label);
-    node.title = label;
-  }
-
   function editLabel({ row, column }: Cell): string {
     return `${actions.text('edit')} · ${actions.columnName(column)} · ${rowName(row)}`;
-  }
-
-  function plain({ cell, value }: Cell): void {
-    cell.textContent = valueText(value);
-    if (typeof value === 'string') cell.title = value;
   }
 
   function readOnly(context: Cell): void {
@@ -288,29 +579,6 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     content.append(strip);
   }
 
-  function paintPillColor(
-    row: Row,
-    column: Column,
-    property: Property | undefined,
-    pill: HTMLElement,
-    label: string,
-  ): void {
-    let tone: OptionColorKey | undefined;
-    if (column === 'tags') {
-      const tagColor = actions.tagColor?.(row, label);
-      if (tagColor?.native && HEX_COLOR.test(tagColor.native)) {
-        pill.style.setProperty(NATIVE_TAG_COLOR, tagColor.native);
-      } else {
-        if (pill.style.length) pill.style.removeProperty(NATIVE_TAG_COLOR);
-        tone = tagColor?.tone;
-      }
-    } else if (property) {
-      tone = optionTone(property, label);
-    }
-    if (tone) pill.dataset.tone = tone;
-    else delete pill.dataset.tone;
-  }
-
   function paintColors(
     row: Row,
     column: Column,
@@ -322,27 +590,6 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     )) {
       paintPillColor(row, column, property, pill, pill.textContent ?? '');
     }
-  }
-
-  function pillStrip(
-    { row, column }: Cell,
-    pills: readonly string[],
-    property?: Property,
-    fullTitle?: string,
-  ): HTMLElement {
-    const strip = element('span', 'zb-cell-pills');
-    if (fullTitle) strip.title = fullTitle;
-    for (const label of pills) {
-      const pill = element('span', 'zb-cell-pill', label);
-      if (fullTitle) pill.title = label;
-      if (property || column === 'tags') paintPillColor(row, column, property, pill, label);
-      strip.append(pill);
-    }
-    const more = element('span', 'zb-cell-pill zb-cell-pill-more');
-    if (fullTitle) more.title = fullTitle;
-    more.hidden = true;
-    strip.append(more);
-    return strip;
   }
 
   function editList(context: Cell, property?: Property): void {
@@ -370,29 +617,6 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       }
       context.cell.append(title, actionsBox);
     },
-    creators({ cell, row }) {
-      const full = row.creators;
-      const first = full.indexOf('; ');
-      cell.textContent =
-        actions.authorFormat?.() !== 'singleLine' &&
-        first !== -1 &&
-        full.indexOf('; ', first + 2) !== -1
-          ? `${full.slice(0, first)} et al.`
-          : valueText(full);
-      cell.title = full;
-    },
-    type(context) {
-      const { cell, row, value } = context;
-      if (typeof value !== 'string' || !value) return plain(context);
-      const badge = element('span', 'zb-type-badge');
-      if (row.itemType) {
-        badge.dataset.itemType = row.itemType;
-        badge.append(createItemTypeIcon(document, row.itemType));
-      }
-      badge.append(element('span', 'zb-type-label', value));
-      cell.append(badge);
-      cell.title = value;
-    },
     tags: editList,
     pdf(context) {
       const { row, cell } = context;
@@ -411,137 +635,11 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     },
   };
 
-  function nativeNumber(context: Cell): void {
-    const { cell, column, value } = context;
-    cell.classList.add('zb-cell-number');
-    if (value === '0' && (column === 'notesCount' || column === 'attachmentsCount')) return;
-    plain(context);
-  }
-
-  function nativeDate({ cell, column, value }: Cell): void {
-    if (typeof value !== 'string') return;
-    cell.classList.add('zb-cell-date');
-    cell.textContent = (column === 'date' ? undefined : dateDay(value)) ?? publicationDate(value);
-    cell.title = value;
-  }
-
-  function nativeList(context: Cell): void {
-    const { cell, value } = context;
-    if (value === null || typeof value !== 'object' || !value.length) return;
-    cell.classList.add('zb-cell-collections');
-    cell.append(pillStrip(context, value, undefined, value.join('; ')));
-  }
-
-  function linkButton(
-    style: string,
-    text: string,
-    label: string,
-    run: () => void,
-  ): HTMLButtonElement {
-    const node = element('button', `zb-link-control ${style}`, text);
-    node.type = 'button';
-    node.tabIndex = -1;
-    named(node, label);
-    node.addEventListener('click', run);
-    node.addEventListener('dblclick', (event) => event.stopPropagation());
-    return node;
-  }
-
-  function nativeLink(context: Cell): void {
-    const { cell, column, value } = context;
-    const linkActions = actions.linkActions;
-    if (typeof value !== 'string' || !value || !linkActions) return plain(context);
-    const doi = column === 'doi' ? doiLink(value) : undefined;
-    const url = column === 'doi' ? doi?.url : webURL(value)?.href;
-    if (!url) return plain(context);
-    const text = doi?.doi ?? value;
-    const open = linkButton('zb-link-open', text, `${actions.text('openLink')} · ${text}`, () =>
-      linkActions.open(url),
-    );
-    control(open, context);
-    cell.append(open);
-    if (doi) {
-      cell.append(
-        linkButton('zb-link-copy', '⧉', `${actions.text('copyDOI')} · ${doi.doi}`, () =>
-          linkActions.copy(doi.doi),
-        ),
-      );
-    }
-  }
-
-  function rating(context: Cell, property: Property): void {
-    const { row, column, value, cell } = context;
-    let current = typeof value === 'string' && isRating(value) ? Number(value) : 0;
-    const rate = row.writable ? actions.rate : undefined;
-    const group = element('span', 'zb-rating');
-    const ratingLabel = actions.text('rating');
-    const label = `${ratingLabel} · ${actions.columnName(column)} · ${rowName(row)}`;
-    group.setAttribute('role', rate ? 'group' : 'img');
-    group.setAttribute(
-      'aria-label',
-      rate ? label : `${label}: ${current}/5 · ${actions.text('readOnly')}`,
-    );
-    for (let index = 1; index <= 5; index++) {
-      const button = rate ? element('button', 'zb-rating-star') : undefined;
-      const star = button ?? element('span', 'zb-rating-star');
-      const icon = createFieldIcon(document, column, 'rating');
-      icon.classList.replace('zb-field-icon', 'zb-rating-icon');
-      star.append(icon);
-      if (rate && button) {
-        button.type = 'button';
-        button.tabIndex = -1;
-        control(button, context);
-        button.dataset.focus += `:${index}`;
-        button.dataset.rating = String(index);
-        button.setAttribute('aria-label', `${ratingLabel} · ${index}/5`);
-        button.addEventListener('click', () => {
-          current = current === index ? 0 : index;
-          // A second click can arrive before the saved value is painted by the host.
-          paint();
-          rate(row, property, current === 0 ? null : String(current));
-        });
-      }
-      group.append(star);
-    }
-    function paint(): void {
-      group.toggleAttribute('data-empty', current === 0);
-      for (let i = 0; i < group.children.length; i++) {
-        const star = group.children[i] as HTMLElement;
-        star.toggleAttribute('data-filled', i < current);
-        if (rate) {
-          const pressed = i + 1 === current;
-          star.setAttribute('aria-pressed', String(pressed));
-          star.title = pressed ? actions.text('clearRating') : star.getAttribute('aria-label')!;
-        }
-      }
-    }
-    paint();
-    cell.classList.add('zb-rating-cell');
-    cell.append(group);
-  }
-
   function propertyURL(context: Cell, property: Property): void {
     const { row, column, value, cell } = context;
-    const text = typeof value === 'string' ? value : '';
-    const url = webURL(text);
-    const compact = url ? `${url.host}${url.pathname === '/' ? '' : url.pathname}` : text;
-    const linkActions = actions.linkActions;
-    cell.classList.add('zb-cell-url');
-    if (url && linkActions) {
-      const open = linkButton(
-        'zb-link-open zb-url-value',
-        compact,
-        `${actions.text('openLink')} · ${text}`,
-        () => linkActions.open(url.href),
-      );
-      control(open, context);
-      cell.append(open);
-    } else if (text) {
-      const label = element('span', 'zb-url-value', compact);
-      label.title = text;
-      cell.append(label);
-    }
+    propertyURLValue(context);
     if (row.writable) {
+      const text = typeof value === 'string' ? value : '';
       const opener = button(
         context,
         () => actions.edit(row, column, property, value, cell, opener),
@@ -554,15 +652,6 @@ export function createCellRenderers(document: Document, actions: CellActions) {
       cell.title = actions.text('readOnly');
     }
   }
-
-  const byType: Record<NativeValueType, (context: Cell) => void> = {
-    text: plain,
-    number: nativeNumber,
-    date: nativeDate,
-    link: nativeLink,
-    multi: nativeList,
-    boolean: plain,
-  };
 
   const custom: Record<PropertyType, (context: Cell, property: Property) => void> = {
     text: editable,
@@ -612,8 +701,9 @@ export function createCellRenderers(document: Document, actions: CellActions) {
     const context: Cell = { row, column, value, cell };
     if (isNativeColumn(column)) {
       if (column === 'citationKey') cell.classList.add('zb-cell-monospace');
-      const draw = native[column] ?? byType[NATIVE_COLUMN_BY_KEY[column].valueType];
-      draw(context);
+      const draw = native[column];
+      if (draw) draw(context);
+      else nativeValue(context, column);
     } else if (property) custom[property.type](context, property);
     else plain(context);
     return cell;

@@ -39,6 +39,13 @@ describe('configuration backup', () => {
       ...view,
       id: 'home',
       frozenCount: 3,
+      layout: 'board',
+      board: {
+        laneField: 'property:Removed stage',
+        cardFields: ['creators', 'property:Rating', 'property:Removed card field'],
+        hideEmptyLanes: true,
+        collapsedLanes: ['null', '"Unread"'],
+      },
       columns: [
         ...view.columns,
         'property:Rating',
@@ -137,6 +144,17 @@ describe('configuration backup', () => {
       JSON.stringify({ schema: [{ ...property, optionColors: { Done: 'pink' } }], views: [view] }),
       JSON.stringify({ schema: [], views: [{ ...view, frozenCount: -1 }] }),
       JSON.stringify({ schema: [], views: [{ ...view, frozenCount: 2.5 }] }),
+      JSON.stringify({ schema: [], views: [{ ...view, layout: false }] }),
+      JSON.stringify({
+        schema: [],
+        views: [
+          {
+            ...view,
+            layout: 'table',
+            board: { cardFields: [], hideEmptyLanes: 'yes', collapsedLanes: [] },
+          },
+        ],
+      }),
       ...[
         null,
         {},
