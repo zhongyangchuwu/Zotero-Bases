@@ -208,7 +208,9 @@ describe('board surface', () => {
     ).toEqual(['Not set', 'Read', 'Done', 'Later', 'Retired']);
     expect(f.lane('Read').querySelector('[data-tone="green"]')).not.toBeNull();
     expect(f.lane('Retired').hasAttribute('data-legacy')).toBe(true);
-    expect(f.lane('Done').querySelector('.zb-board-lane-empty')?.textContent).toBe('No items');
+    expect(f.lane('Done').querySelector('.zb-board-lane-empty')?.textContent).toBe(
+      'Drop an item here',
+    );
     f.model.property = priority;
     f.render();
     expect(f.lane('5').querySelector('.zb-board-lane-mark[data-tone="amber"] svg')).not.toBeNull();
@@ -304,48 +306,101 @@ describe('board surface', () => {
     f.settings.hideEmptyLanes = true;
     f.render();
     f.card(1).focus();
-    expect(key(f.card(1), 'l')).toBe(true);
+    expect(key(f.card(1), 'ArrowRight')).toBe(true);
     expect(document.activeElement).toBe(f.card(2));
-    key(f.card(2), 'j');
+    key(f.card(2), 'ArrowDown');
     expect(document.activeElement).toBe(f.card(3));
     key(f.card(3), 'ArrowLeft');
     expect(document.activeElement).toBe(f.card(1));
     key(f.card(1), 'ArrowRight');
     expect(document.activeElement).toBe(f.card(3));
-    key(f.card(3), 'k');
+    key(f.card(3), 'ArrowUp');
     expect(document.activeElement).toBe(f.card(2));
 
     f.settings.hideEmptyLanes = false;
     f.render();
-    key(f.card(2), 'l');
+    key(f.card(2), 'ArrowRight');
     expect(document.activeElement).toBe(f.header('Later'));
     expect(key(f.header('Later'), 'Enter')).toBe(false);
     expect(key(f.header('Later'), ' ')).toBe(false);
-    key(f.header('Later'), 'h');
+    key(f.header('Later'), 'ArrowLeft');
     expect(document.activeElement).toBe(f.card(2));
     f.card(1).focus();
     expect(key(f.card(1), 'Enter')).toBe(true);
-    expect(key(f.card(1), 'o')).toBe(true);
-    expect(f.open.mock.calls.map(([, pdf]) => pdf)).toEqual([false, true]);
-    f.card(2).focus();
-    expect(key(f.card(2), 'o')).toBe(false);
+    expect(key(f.card(1), ' ')).toBe(false);
+    expect(f.open).toHaveBeenCalledExactlyOnceWith(f.model.rows[0], false);
 
     const control = f.card(2).querySelector('button')!;
     control.focus();
-    expect(key(control, 'h')).toBe(false);
+    expect(key(control, 'ArrowLeft')).toBe(false);
+    expect(key(control, 'Enter')).toBe(false);
+    expect(key(control, ' ')).toBe(false);
     expect(key(control, '5')).toBe(false);
     expect(document.activeElement).toBe(control);
     f.search.focus();
-    expect(key(f.search, 'j')).toBe(false);
+    expect(key(f.search, 'ArrowDown')).toBe(false);
     expect(key(f.search, '1')).toBe(false);
     expect(f.write).not.toHaveBeenCalled();
   });
 
+  it('lets Escape leave card, lane, and nested action focus, then release the board', () => {
+    const f = fixture([sample(1, 'Status: Read')]);
+    f.render();
+    const card = f.card(1);
+    const action = card.querySelector('button')!;
+    for (const target of [card, f.header('Read'), action]) {
+      target.focus();
+      expect(key(target, 'Escape')).toBe(true);
+      expect(document.activeElement).toBe(f.root);
+    }
+    expect(key(f.root, 'Escape', { repeat: true })).toBe(false);
+    expect(document.activeElement).toBe(f.root);
+    expect(key(f.root, 'Escape')).toBe(true);
+    expect(f.root.contains(document.activeElement)).toBe(false);
+
+    const input = document.createElement('input');
+    card.append(input);
+    for (const target of [input, f.search]) {
+      target.focus();
+      expect(key(target, 'Escape')).toBe(false);
+      expect(document.activeElement).toBe(target);
+    }
+  });
+
+  it('preserves native focus and arrow scrolling for tabbable overflow without blocking drag', () => {
+    const f = fixture([sample(1), sample(2)]);
+    f.render();
+    const card = f.card(1);
+    const metadata = document.createElement('div');
+    metadata.setAttribute('data-board-card-scroll', '');
+    metadata.tabIndex = 0;
+    const field = document.createElement('span');
+    metadata.append(field);
+    card.append(metadata);
+
+    metadata.focus();
+    expect(key(metadata, 'ArrowDown')).toBe(false);
+    field.click();
+    expect(document.activeElement).toBe(metadata);
+    expect(key(metadata, 'Escape')).toBe(true);
+    expect(document.activeElement).toBe(f.root);
+
+    const dnd = transfer();
+    field.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(drag(card, 'dragstart', dnd)).toBe(false);
+    expect(dnd.effectAllowed).toBe('move');
+    drag(card, 'dragend', dnd);
+
+    metadata.removeAttribute('tabindex');
+    field.click();
+    expect(document.activeElement).toBe(card);
+  });
+
   it.each(['save', 'refresh'] as const)(
-    'follows a moved card into a collapsed lane when %s arrives first',
+    'follows a rating into a collapsed lane when %s arrives first',
     async (first) => {
-      const f = fixture([sample(1, 'Status: Read')]);
-      f.settings.collapsedLanes = ['"Done"'];
+      const f = fixture([sample(1, 'Priority: 2')], { property: priority });
+      f.settings.collapsedLanes = ['"4"'];
       let complete!: () => void;
       f.model.beforeWrite = () =>
         new Promise<void>((resolve) => {
@@ -353,57 +408,67 @@ describe('board surface', () => {
         });
       f.render();
       f.card(1).focus();
-      expect(key(f.card(1), 'L', { shiftKey: true })).toBe(true);
-      expect(key(f.card(1), 'L', { shiftKey: true })).toBe(false);
-      expect(f.write).toHaveBeenCalledExactlyOnceWith(f.model.rows[0], status, 'Done');
+      expect(key(f.card(1), '4')).toBe(true);
+      expect(key(f.card(1), '4')).toBe(false);
+      expect(f.write).toHaveBeenCalledExactlyOnceWith(f.model.rows[0], priority, '4');
       expect(f.card(1).hasAttribute('data-pending')).toBe(true);
       expect(f.toggle).not.toHaveBeenCalled();
       if (first === 'refresh') {
-        f.model.rows = [sample(1, 'Status: Done')];
+        f.model.rows = [sample(1, 'Priority: 4')];
         f.render();
-        expect(document.activeElement).toBe(f.header('Done'));
+        expect(document.activeElement).toBe(f.header('4'));
         expect(f.toggle).not.toHaveBeenCalled();
       }
       complete();
       await writesSettle();
       if (first === 'save') {
-        expect(f.lane('Read').contains(f.card(1))).toBe(true);
+        expect(f.lane('2').contains(f.card(1))).toBe(true);
         expect(f.toggle).not.toHaveBeenCalled();
         f.render();
       }
-      expect(f.toggle).toHaveBeenCalledExactlyOnceWith('"Done"');
-      expect(f.header('Done').getAttribute('aria-expanded')).toBe('true');
-      expect(f.lane('Done').contains(f.card(1))).toBe(true);
+      expect(f.toggle).toHaveBeenCalledExactlyOnceWith('"4"');
+      expect(f.header('4').getAttribute('aria-expanded')).toBe('true');
+      expect(f.lane('4').contains(f.card(1))).toBe(true);
       expect(document.activeElement).toBe(f.card(1));
     },
   );
 
-  it('can leave a legacy lane with Shift, but never moves a read-only row', async () => {
-    const f = fixture([sample(1, 'Status: Old'), sample(2, 'Status: Done', false)]);
+  it('only moves the card out of a legacy lane by native drag', async () => {
+    const f = fixture([sample(1, 'Status: Old')]);
     f.render();
-    f.card(2).focus();
-    expect(key(f.card(2), 'ArrowLeft', { shiftKey: true })).toBe(false);
     f.card(1).focus();
-    expect(key(f.card(1), 'ArrowLeft', { shiftKey: true })).toBe(true);
+    expect(key(f.card(1), 'ArrowLeft', { shiftKey: true })).toBe(false);
+    expect(key(f.card(1), 'H', { shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(f.card(1));
+    expect(f.write).not.toHaveBeenCalled();
+
+    const dnd = transfer();
+    expect(drag(f.card(1), 'dragstart', dnd)).toBe(false);
+    expect(drag(f.lane('Later'), 'drop', dnd)).toBe(true);
     expect(f.write).toHaveBeenCalledExactlyOnceWith(f.model.rows[0], status, 'Later');
     await writesSettle();
     f.render();
-    expect(f.lane('Later').contains(document.activeElement)).toBe(true);
+    expect(f.lane('Later').contains(f.card(1))).toBe(true);
   });
 
-  it('does not expand a destination or reclaim focus after the user goes back to search', async () => {
-    const f = fixture([sample(1, 'Status: Read')]);
-    f.settings.collapsedLanes = ['"Done"'];
-    f.render();
-    f.card(1).focus();
-    key(f.card(1), 'L', { shiftKey: true });
-    f.search.focus();
-    await writesSettle();
-    f.render();
-    expect(f.toggle).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(f.search);
-    expect(f.header('Done').getAttribute('aria-expanded')).toBe('false');
-  });
+  it.each(['search', 'Escape'])(
+    'does not expand a rating destination or reclaim focus after leaving the card with %s',
+    async (exit) => {
+      const f = fixture([sample(1, 'Priority: 2')], { property: priority });
+      f.settings.collapsedLanes = ['"4"'];
+      f.render();
+      f.card(1).focus();
+      expect(key(f.card(1), '4')).toBe(true);
+      const focusTarget = exit === 'search' ? f.search : f.root;
+      if (exit === 'search') f.search.focus();
+      else expect(key(f.card(1), 'Escape')).toBe(true);
+      await writesSettle();
+      f.render();
+      expect(f.toggle).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focusTarget);
+      expect(f.header('4').getAttribute('aria-expanded')).toBe('false');
+    },
+  );
 
   it('repaints a failed write without losing focus or showing the card in the destination', async () => {
     const row = sample(1, 'Priority: 2');

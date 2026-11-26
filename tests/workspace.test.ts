@@ -468,15 +468,18 @@ describe('Zotero Bases workspace', () => {
     const { root } = attach(host);
     await settle();
     const card = () => get(root, '.zb-board-card[data-item-id="1"]');
+    const board = get(root, '.zb-board');
     const search = get<HTMLInputElement>(root, 'input[role="searchbox"]');
     search.focus();
     expect(focusedKey('5')).toBe(true);
-    openTool(root, 'Lanes');
+    const lanes = get<HTMLButtonElement>(root, 'button[aria-haspopup="dialog"][title="Lanes"]');
+    lanes.click();
     card().focus();
     expect(focusedKey('5')).toBe(true);
     expect(host.setProperty).not.toHaveBeenCalled();
-    focusedKey('Escape');
-    card().focus();
+    expect(focusedKey('Escape')).toBe(false);
+    expect(lanes.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(card());
     expect(focusedKey('5', { isComposing: true })).toBe(true);
     expect(focusedKey('5', { repeat: true })).toBe(true);
     expect(focusedKey(' ')).toBe(true);
@@ -486,6 +489,10 @@ describe('Zotero Bases workspace', () => {
     expect(document.activeElement).toBe(card());
     expect(focusedKey('Enter')).toBe(false);
     expect(host.openItem).toHaveBeenLastCalledWith(1, false);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(document.activeElement).toBe(board);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(board.contains(document.activeElement)).toBe(false);
   });
 
   it('keeps the header Columns popover anchored through order, visibility, and default resets', async () => {

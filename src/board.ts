@@ -35,10 +35,13 @@ export interface BoardController {
 
 const XHTML = 'http://www.w3.org/1999/xhtml';
 const PAGE_SIZE = 60;
+const EDITABLE =
+  'input, select, textarea, [contenteditable]:not([contenteditable="false"]), ' +
+  '[role="combobox"], [role="textbox"]';
 const INTERACTIVE =
-  'input, select, textarea, button, a[href], summary, audio[controls], video[controls], ' +
-  '[contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"], ' +
-  '[role="checkbox"], [role="combobox"], [role="textbox"], [role="slider"]';
+  `${EDITABLE}, button, a[href], summary, audio[controls], video[controls], ` +
+  '[role="button"], [role="link"], [role="checkbox"], [role="slider"]';
+const CARD_SCROLL = '[data-board-card-scroll][tabindex="0"]';
 const words = {
   board: ['Board', '看板'],
   unset: ['Not set', '未设置'],
@@ -54,7 +57,7 @@ const words = {
   ],
   properties: ['Open properties', '打开属性'],
   noMatches: ['No matching items.', '没有匹配的条目。'],
-  emptyLane: ['No items', '没有条目'],
+  dropHere: ['Drop an item here', '将条目拖到这里'],
 } as const;
 
 interface CardNode {
@@ -249,18 +252,20 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
     section.dataset.laneId = lane.id;
     const toggle = element('button', 'zb-board-lane-toggle');
     toggle.type = 'button';
+    const chip = element('span', 'zb-board-lane-chip');
     const mark = element('span', 'zb-board-lane-mark');
     mark.setAttribute('aria-hidden', 'true');
     const name = element('span', 'zb-board-lane-label');
     const count = element('span', 'zb-board-lane-count');
     const chevron = element('span', 'zb-board-lane-chevron');
     chevron.setAttribute('aria-hidden', 'true');
-    toggle.append(mark, name, count, chevron);
+    chip.append(mark, name);
+    toggle.append(chip, count, chevron);
     section.append(toggle);
     const scroll = element('div', 'zb-board-lane-scroll');
     const cards = element('div', 'zb-board-cards');
     const empty = element('p', 'zb-board-lane-empty');
-    empty.textContent = text('emptyLane');
+    empty.textContent = text('dropHere');
     const tail = element('div', 'zb-board-lane-tail');
     tail.setAttribute('aria-hidden', 'true');
     scroll.append(cards, empty, tail);
@@ -322,9 +327,18 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
     if (rated && !mark.firstChild)
       mark.append(createFieldIcon(doc, `property:${property.key}`, 'rating'));
     mark.toggleAttribute('data-rating-lane', rated);
-    if (rated) mark.dataset.tone = 'amber';
-    else if (lane.value !== null) mark.dataset.tone = optionTone(property, lane.value);
-    else delete mark.dataset.tone;
+    const tone = rated
+      ? 'amber'
+      : lane.value !== null && lane.writable
+        ? optionTone(property, lane.value)
+        : undefined;
+    if (tone) {
+      section.dataset.tone = tone;
+      mark.dataset.tone = tone;
+    } else {
+      delete section.dataset.tone;
+      delete mark.dataset.tone;
+    }
     mark.hidden = lane.value === null;
     if (lane.collapsed && !scroll.hidden) node.scrollTop = scroll.scrollTop;
     const expanding = scroll.hidden && !lane.collapsed;
@@ -558,10 +572,10 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
     await write(current, property, value, destination, true);
   }
 
-  function move(row: Row, from: LaneNode, to: LaneNode, followCard: boolean): void {
+  function move(row: Row, from: LaneNode, to: LaneNode): void {
     const property = state?.property;
     if (!property || from === to || !to.lane.writable) return;
-    void write(row, property, to.lane.value, followCard ? to.lane.id : undefined).catch(() => {
+    void write(row, property, to.lane.value).catch(() => {
       // The host reports write failures; the board restores from the latest rendered rows.
     });
   }
@@ -569,43 +583,34 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
   function key(event: KeyboardEvent): boolean {
     const active = doc.activeElement;
     const target = targetElement(event.target) ?? active;
-    if (
-      !state?.property ||
-      state.loading ||
-      root.hidden ||
-      !root.contains(active) ||
-      !root.contains(target)
-    )
-      return false;
+    if (root.hidden || !root.contains(active) || !root.contains(target)) return false;
     const source = laneAt(target);
     const card = cardAt(source, target);
-    const control = target?.closest(INTERACTIVE);
-    if (control && control !== source?.toggle) return false;
     const command = keys.handle(event, card ? 'card' : source ? 'lane' : 'board');
     if (!command) return false;
+    if (command === 'escape') {
+      if (target?.closest(EDITABLE)) return false;
+      if (active === root) root.blur();
+      else if (source) root.focus({ preventScroll: true });
+      else return false;
+      event.preventDefault();
+      return true;
+    }
+    if (!state?.property || state.loading || target?.matches(CARD_SCROLL)) return false;
+    const control = target?.closest(INTERACTIVE);
+    if (control && control !== source?.toggle) return false;
     const order = state.lanes;
-    const index = source ? order.findIndex(({ id }) => id === source.lane.id) : -1;
-    if (
-      command === 'left' ||
-      command === 'right' ||
-      command === 'moveLeft' ||
-      command === 'moveRight'
-    ) {
-      const step = command === 'left' || command === 'moveLeft' ? -1 : 1;
-      const moving = command === 'moveLeft' || command === 'moveRight';
-      if (moving && (!card?.row.writable || !source || pending.has(card.row.id))) return false;
-      let next = index < 0 ? (step < 0 ? order.length - 1 : 0) : index + step;
-      while (moving && order[next] && !order[next]?.writable) next += step;
+    if (command === 'left' || command === 'right') {
+      const index = source ? order.findIndex(({ id }) => id === source.lane.id) : -1;
+      const step = command === 'left' ? -1 : 1;
+      const next = index < 0 ? (step < 0 ? order.length - 1 : 0) : index + step;
       const neighbor = order[next];
       const destination = neighbor && lanes.get(neighbor.id);
       if (!destination) return false;
-      if (moving && card && source) move(card.row, source, destination, true);
-      else {
-        const remembered = destination.lane.rows.findIndex(
-          (row) => row.id === destination.remembered,
-        );
-        focusLane(destination, Math.max(0, remembered));
-      }
+      const remembered = destination.lane.rows.findIndex(
+        (row) => row.id === destination.remembered,
+      );
+      focusLane(destination, Math.max(0, remembered));
     } else if (command === 'up' || command === 'down') {
       const lane = source ?? (order[0] && lanes.get(order[0].id));
       if (!lane || lane.lane.collapsed || lane.lane.rows.length === 0) return false;
@@ -618,8 +623,8 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
       if (!property || !card.row.writable || pending.has(card.row.id)) return false;
       if (readProperty(card.row.extra, property) !== command.rating)
         void rate(card.row, property, command.rating).catch(() => {});
-    } else if (card && (command === 'locate' || (command === 'openPdf' && card.row.pdf))) {
-      actions.open(card.row, command === 'openPdf');
+    } else if (card && command === 'locate') {
+      actions.open(card.row, false);
     } else return false;
     event.preventDefault();
     return true;
@@ -652,7 +657,12 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
       return;
     }
     const card = cardAt(lane, target);
-    if (card && !target?.closest(INTERACTIVE) && !hasSelection(card.element))
+    if (
+      card &&
+      !target?.closest(INTERACTIVE) &&
+      !target?.closest(CARD_SCROLL) &&
+      !hasSelection(card.element)
+    )
       card.element.focus({ preventScroll: true });
   }
 
@@ -750,7 +760,7 @@ export function createBoard(root: HTMLElement, actions: BoardActions): BoardCont
     finishDrag();
     if (accepted) {
       event.preventDefault();
-      move(source.card.row, source.lane, lane, false);
+      move(source.card.row, source.lane, lane);
     }
   }
 

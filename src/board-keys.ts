@@ -5,10 +5,8 @@ export type BoardCommand =
   | 'right'
   | 'up'
   | 'down'
-  | 'moveLeft'
-  | 'moveRight'
   | 'locate'
-  | 'openPdf'
+  | 'escape'
   | { readonly rating: Exclude<RatingKey, '0'> | null };
 
 export type BoardKeyContext = 'board' | 'lane' | 'card';
@@ -28,7 +26,7 @@ type BoardKeyEvent = Pick<
 
 export class BoardKeys {
   handle(event: BoardKeyEvent, context?: BoardKeyContext): BoardCommand | undefined {
-    const { key, shiftKey, repeat } = event;
+    const { key, repeat } = event;
     if (
       !context ||
       event.defaultPrevented ||
@@ -36,47 +34,28 @@ export class BoardKeys {
       event.keyCode === 229 ||
       event.ctrlKey ||
       event.altKey ||
-      event.metaKey
+      event.metaKey ||
+      event.shiftKey
     )
       return undefined;
 
-    if (shiftKey) {
-      if (context !== 'card' || repeat) return undefined;
-      switch (key) {
-        case 'H':
-        case 'h':
-        case 'ArrowLeft':
-          return 'moveLeft';
-        case 'L':
-        case 'l':
-        case 'ArrowRight':
-          return 'moveRight';
-        default:
-          return undefined;
-      }
-    }
-
     switch (key) {
-      case 'h':
       case 'ArrowLeft':
         return 'left';
-      case 'l':
       case 'ArrowRight':
         return 'right';
-      case 'j':
       case 'ArrowDown':
         return 'down';
-      case 'k':
       case 'ArrowUp':
         return 'up';
     }
 
-    if (context !== 'card' || repeat) return undefined;
+    if (repeat) return undefined;
+    if (key === 'Escape') return 'escape';
+    if (context !== 'card') return undefined;
     switch (key) {
       case 'Enter':
         return 'locate';
-      case 'o':
-        return 'openPdf';
       case '0':
       case '1':
       case '2':

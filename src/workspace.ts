@@ -107,8 +107,8 @@ const words = {
   expandLanes: ['Expand all lanes', '展开全部泳道'],
   collapseLanes: ['Collapse all lanes', '折叠全部泳道'],
   boardKeyboardHint: [
-    'h/l Lanes · j/k Cards · Shift+h/l Move card · 1–5 / 0 Rate / clear · Enter Locate · o PDF',
-    'h/l 换泳道 · j/k 换卡片 · Shift+h/l 移卡 · 1–5／0 评分／清空 · Enter 定位 · o 打开 PDF',
+    '←/→ Lanes · ↑/↓ Cards · 1–5 / 0 Rate / clear · Enter Locate · Esc Exit focus',
+    '←/→ 换泳道 · ↑/↓ 换卡片 · 1–5／0 评分／清空 · Enter 定位 · Esc 退出焦点',
   ],
   copyView: ['Copy view', '复制视图'],
   renameView: ['Rename view', '重命名视图'],

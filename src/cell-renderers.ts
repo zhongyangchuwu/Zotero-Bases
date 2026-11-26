@@ -288,9 +288,11 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
   ): HTMLElement {
     const strip = element('span', 'zb-cell-pills');
     if (fullTitle) strip.title = fullTitle;
-    for (const label of pills) {
+    const visible = card ? Math.min(pills.length, 2) : pills.length;
+    for (let index = 0; index < visible; index++) {
+      const label = pills[index]!;
       const pill = element('span', 'zb-cell-pill', label);
-      if (fullTitle) pill.title = label;
+      if (fullTitle && !card) pill.title = label;
       if (property || column === 'tags') paintPillColor(row, column, property, pill, label);
       strip.append(pill);
     }
@@ -298,6 +300,10 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
       const more = element('span', 'zb-cell-pill zb-cell-pill-more');
       if (fullTitle) more.title = fullTitle;
       more.hidden = true;
+      strip.append(more);
+    } else if (visible < pills.length) {
+      const more = element('span', 'zb-cell-pill zb-cell-pill-more', `+${pills.length - visible}`);
+      if (fullTitle) more.title = fullTitle;
       strip.append(more);
     }
     return strip;
@@ -339,7 +345,8 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
   function nativeDate({ cell, column, value }: Field): void {
     if (typeof value !== 'string') return;
     cell.classList.add('zb-cell-date');
-    cell.textContent = (column === 'date' ? undefined : dateDay(value)) ?? publicationDate(value);
+    cell.textContent =
+      (!card && column === 'date' ? undefined : dateDay(value)) ?? publicationDate(value);
     cell.title = value;
   }
 
@@ -387,18 +394,20 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
     }
   }
 
-  function rating(context: Field, property: Property): void {
+  function rating(context: Field, property: Property, onChange?: (empty: boolean) => void): void {
     const { row, column, value, cell } = context;
     let current = typeof value === 'string' && isRating(value) ? Number(value) : 0;
     const rate = row.writable ? actions.rate : undefined;
     const group = element('span', 'zb-rating');
     const ratingLabel = actions.text('rating');
-    const label = `${ratingLabel} · ${actions.columnName(column)} · ${rowName(row)}`;
+    const fieldName = actions.columnName(column);
+    const label = `${ratingLabel} · ${fieldName} · ${rowName(row)}`;
     group.setAttribute('role', rate ? 'group' : 'img');
     group.setAttribute(
       'aria-label',
       rate ? label : `${label}: ${current}/5 · ${actions.text('readOnly')}`,
     );
+    if (card) group.title = group.getAttribute('aria-label')!;
     for (let index = 1; index <= 5; index++) {
       const button = rate ? element('button', 'zb-rating-star') : undefined;
       const star = button ?? element('span', 'zb-rating-star');
@@ -411,7 +420,10 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
         control(button, context);
         button.dataset.focus += `:${index}`;
         button.dataset.rating = String(index);
-        button.setAttribute('aria-label', `${ratingLabel} · ${index}/5`);
+        button.setAttribute(
+          'aria-label',
+          card ? `${ratingLabel} · ${fieldName} · ${index}/5` : `${ratingLabel} · ${index}/5`,
+        );
         button.addEventListener('click', () => {
           if (card) {
             const pending = cell.closest<HTMLElement>('.zb-board-card[data-pending]');
@@ -420,6 +432,7 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
           current = current === index ? 0 : index;
           // A second click can arrive before the saved value is painted by the host.
           paint();
+          onChange?.(current === 0);
           rate(row, property, current === 0 ? null : String(current));
         });
       }
@@ -433,7 +446,10 @@ function createValueRenderers(document: Document, actions: ValueActions, card = 
         if (rate) {
           const pressed = i + 1 === current;
           star.setAttribute('aria-pressed', String(pressed));
-          star.title = pressed ? actions.text('clearRating') : star.getAttribute('aria-label')!;
+          if (pressed) {
+            const clear = actions.text('clearRating');
+            star.title = card ? `${clear} · ${fieldName}` : clear;
+          } else star.title = star.getAttribute('aria-label')!;
         }
       }
     }
@@ -507,10 +523,11 @@ export function createBoardFieldRenderer(document: Document, actions: ValueActio
     column: Column,
     property: Property | undefined,
     value: PropertyValue,
+    onRatingChange?: (empty: boolean) => void,
   ): void => {
     const field: Field = { cell, row, column, value };
-    if (property?.type === 'rating') rating(field, property);
-    else if (property?.type === 'url') propertyURLValue(field);
+    if (property?.type === 'rating') rating(field, property, onRatingChange);
+    else if (column === 'url' || property?.type === 'url') propertyURLValue(field);
     else if (
       column === 'tags' ||
       property?.type === 'multi-select' ||
@@ -518,7 +535,7 @@ export function createBoardFieldRenderer(document: Document, actions: ValueActio
     ) {
       const choices = typeof value === 'string' ? [value] : value;
       if (choices && typeof choices === 'object' && choices.length)
-        cell.append(pillStrip(field, choices, property));
+        cell.append(pillStrip(field, choices, property, choices.join('; ')));
     } else if (isNativeColumn(column)) nativeValue(field, column);
     else plain(field);
   };

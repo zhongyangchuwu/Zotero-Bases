@@ -32,15 +32,76 @@ export function createBoardCards(document: Document, options: BoardCardOptions) 
     properties: readonly Property[],
   ): void {
     const name = row.title || options.text('untitled');
+    const body = element('div', 'zb-board-card-content');
     const title = element('h3', 'zb-board-card-title');
     title.textContent = name;
     title.title = name;
+    body.append(title);
 
-    let details: HTMLDListElement | undefined;
-    let pdfInFields = false;
+    function valueField(column: Column) {
+      const field = element('span', 'zb-board-card-value');
+      field.dataset.column = column;
+      return field;
+    }
+
+    const creators = fields.includes('creators') && Boolean(row.creators.trim());
+    const withYear = fields.includes('year') && Boolean(row.year.trim());
+    if (creators || withYear) {
+      const byline = element('div', 'zb-board-card-byline');
+      if (creators) {
+        const author = valueField('creators');
+        drawField(author, row, 'creators', undefined, row.creators);
+        byline.append(author);
+      }
+      if (withYear) {
+        const year = valueField('year');
+        drawField(year, row, 'year', undefined, row.year);
+        if (byline.firstChild) {
+          const separator = element('span', 'zb-board-card-byline-dot');
+          separator.textContent = ' · ';
+          byline.append(separator);
+        }
+        byline.append(year);
+      }
+      body.append(byline);
+    }
+
+    const details = element('div', 'zb-board-card-fields');
+    const ordered: HTMLElement[] = [];
+    let tags: HTMLElement | undefined;
+    let tray: HTMLElement | undefined;
+
+    function updateScrollableDetails(): void {
+      const scrollable = details.childElementCount > 4;
+      if (scrollable === details.hasAttribute('data-board-card-scroll')) return;
+      if (scrollable) {
+        details.setAttribute('data-board-card-scroll', '');
+        details.tabIndex = 0;
+        details.setAttribute('role', 'region');
+        details.setAttribute('aria-label', name);
+        details.dataset.focus = `board:${row.id}:metadata`;
+      } else {
+        details.removeAttribute('data-board-card-scroll');
+        details.removeAttribute('tabindex');
+        details.removeAttribute('role');
+        details.removeAttribute('aria-label');
+        delete details.dataset.focus;
+      }
+    }
+
+    function placeRating(field: HTMLElement, destination: HTMLElement): void {
+      if (field.parentElement === destination) return;
+      const active = document.activeElement as HTMLElement | null;
+      const focused = active && field.contains(active) ? active : null;
+      const index = ordered.indexOf(field);
+      const next = ordered.find((sibling, i) => i > index && sibling.parentElement === destination);
+      destination.insertBefore(field, next ?? null);
+      updateScrollableDetails();
+      focused?.focus({ preventScroll: true });
+    }
+
     for (const column of fields) {
-      if (column === 'title') continue;
-      if (column === 'pdf' && !row.pdf) continue;
+      if (column === 'title' || column === 'creators' || column === 'year') continue;
       const native = isNativeColumn(column);
       const key = native ? undefined : column.slice('property:'.length);
       const property =
@@ -54,43 +115,64 @@ export function createBoardCards(document: Document, options: BoardCardOptions) 
             : undefined;
         value = pending === undefined ? readProperty(row.extra, property) : pending || null;
       }
+      const editableRating = property?.type === 'rating' && row.writable && Boolean(options.rate);
       if (
-        property?.type !== 'rating' &&
-        (value === null || value === '' || (typeof value === 'object' && !value.length))
+        !editableRating &&
+        (value === null ||
+          value === false ||
+          (typeof value === 'string' && !value.trim()) ||
+          (typeof value === 'object' && !value.length))
       )
         continue;
 
-      const field = element('div', 'zb-board-card-field');
-      const label = element('dt', 'zb-board-card-label');
-      label.textContent = options.columnName(column);
-      const content = element('dd', 'zb-board-card-value');
-      content.dataset.column = column;
+      const field = valueField(column);
+      if (column === 'tags') {
+        drawField(field, row, column, property, value);
+        tags = field;
+        continue;
+      }
+      ordered.push(field);
       if (column === 'pdf') {
-        content.append(action(row, name, true));
-        pdfInFields = true;
-      } else drawField(content, row, column, property, value);
-      field.append(label, content);
-      (details ??= element('dl', 'zb-board-card-fields')).append(field);
+        field.append(action(row, name, true));
+      } else if (editableRating) {
+        const ratingTray = (tray ??= element('div', 'zb-board-card-rating-tray'));
+        const label = element('span', 'zb-board-card-rating-name');
+        label.title = options.columnName(column);
+        label.textContent = label.title;
+        label.setAttribute('aria-hidden', 'true');
+        field.append(label);
+        drawField(field, row, column, property, value, (empty) => {
+          placeRating(field, empty ? ratingTray : details);
+        });
+        if (value === null) {
+          ratingTray.append(field);
+          continue;
+        }
+      } else {
+        drawField(field, row, column, property, value);
+      }
+      details.append(field);
     }
 
-    const footer = element('footer', 'zb-board-card-footer');
-    if (row.pdf && !pdfInFields) footer.append(action(row, name, true, false));
-    footer.append(action(row, name, false));
-    if (details) root.replaceChildren(title, details, footer);
-    else root.replaceChildren(title, footer);
+    updateScrollableDetails();
+    body.append(details);
+    if (tags) body.append(tags);
+    body.append(action(row, name, false));
+    if (tray) body.append(tray);
+    root.replaceChildren(body);
   }
 
-  function action(row: Row, name: string, pdf: boolean, showCaption = true): HTMLButtonElement {
+  function action(row: Row, name: string, pdf: boolean): HTMLButtonElement {
     const kind = pdf ? 'pdf' : 'locate';
-    const caption = options.text(pdf ? 'openPDF' : 'open');
+    const caption = options.text(pdf ? 'openPDF' : 'locate');
     const button = element('button', `zb-board-card-${kind}`);
     button.type = 'button';
-    if (showCaption) button.textContent = caption;
-    button.title = `${pdf ? caption : options.text('locate')} · ${name}`;
+    button.title = pdf ? caption : `${caption} · ${name}`;
     button.setAttribute('aria-label', `${caption} · ${name}`);
     button.dataset.focus = `board:${row.id}:${kind}`;
     button.addEventListener('click', () => options.open(row, pdf));
-    if (pdf) button.prepend(createAttachmentIcon(document, 'pdf'));
+    if (pdf) button.append(createAttachmentIcon(document, 'pdf'));
+    else button.textContent = options.text('open');
     return button;
   }
 
