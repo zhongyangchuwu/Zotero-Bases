@@ -58,7 +58,8 @@ export const boardCSS = String.raw`
   background: color-mix(in srgb, var(--zb-lane-tone) 8%, transparent);
 }
 .zb-workspace .zb-board-lane[data-collapsed] > .zb-board-lane-toggle {
-  flex-direction: column;
+  display: grid;
+  justify-items: center;
   padding: 0.35em 0.15em;
 }
 .zb-workspace .zb-board-lane-chip {
@@ -71,7 +72,8 @@ export const boardCSS = String.raw`
   background: color-mix(in srgb, var(--zb-lane-tone) 14%, transparent);
 }
 .zb-workspace [data-collapsed] .zb-board-lane-chip {
-  flex-direction: column;
+  display: grid;
+  justify-items: center;
   padding: 0.35em 0.06em;
 }
 .zb-workspace .zb-board-lane-label {
