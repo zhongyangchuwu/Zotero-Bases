@@ -35,7 +35,11 @@ export const boardCSS = String.raw`
     color-mix(in srgb, var(--zb-lane-tone) 10%, transparent)
   );
 }
-.zb-workspace .zb-board-lane[data-collapsed] { flex-basis: 2.6em; }
+.zb-workspace .zb-board-lane[data-collapsed] {
+  flex-basis: 2.6em;
+  /* Gecko's intrinsic button height can omit the vertical label. */
+  block-size: 9em;
+}
 .zb-workspace .zb-board-lane[data-drop-target] {
   background: color-mix(in srgb, var(--zb-accent) 16%, var(--zb-bg));
   box-shadow: inset 0 0 0 2px var(--zb-accent);
@@ -59,6 +63,10 @@ export const boardCSS = String.raw`
 }
 .zb-workspace .zb-board-lane[data-collapsed] > .zb-board-lane-toggle {
   display: grid;
+  flex: 1 1 0;
+  min-block-size: 0;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  align-items: stretch;
   justify-items: center;
   padding: 0.35em 0.15em;
 }
@@ -73,6 +81,9 @@ export const boardCSS = String.raw`
 }
 .zb-workspace [data-collapsed] .zb-board-lane-chip {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-block-size: 0;
+  align-items: stretch;
   justify-items: center;
   padding: 0.35em 0.06em;
 }
@@ -83,7 +94,10 @@ export const boardCSS = String.raw`
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.zb-workspace [data-collapsed] .zb-board-lane-label { writing-mode: vertical-rl; }
+.zb-workspace [data-collapsed] .zb-board-lane-label {
+  grid-row: 2;
+  writing-mode: vertical-rl;
+}
 .zb-workspace .zb-board-lane-mark {
   flex: none;
   display: inline-grid;
