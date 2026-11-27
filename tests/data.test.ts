@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SCHEMA_PREF, TAG_COLORS_PREF, VIEWS_PREF } from '../src/config';
-import { createWorkspaceHost } from '../src/data';
+import { createConfigurationBackup } from '../src/backup';
+import {
+  createConfig,
+  decodeSyncSnapshot,
+  SCHEMA_PREF,
+  TAG_COLORS_PREF,
+  VIEWS_PREF,
+} from '../src/config';
+import { createPropertyValidation, createWorkspaceHost } from '../src/data';
 import type { LibraryOwner, Prefs, ZoteroData } from '../src/data';
-import type { AttachmentKind, Property } from '../src/contracts';
+import type { AttachmentKind, Property, WorkspaceHost } from '../src/contracts';
+import { createGlobalPreferenceStore } from '../src/global-preferences';
 
 type Item = Awaited<ReturnType<ZoteroData['Items']['getAll']>>[number];
 type Collection = ReturnType<ZoteroData['Collections']['getByLibrary']>[number];
@@ -187,6 +195,7 @@ function harness(
   items: readonly Item[] = [],
   collectionItems: readonly Item[] = [],
   additionalCollections: readonly Collection[] = [],
+  raw = new Map([[SCHEMA_PREF, '[]']]),
 ) {
   const libraries = [
     {
@@ -242,7 +251,6 @@ function harness(
   };
   const root: Collection = { ...child, id: 14, key: 'ROOT0007', parentID: false, name: 'Root' };
   const collections = [root, child, ...additionalCollections];
-  const raw = new Map<string, string>();
   const prefObservers = new Map<symbol, { key: string; listener: () => void }>();
   const nativeObservers = new Map<
     string,
@@ -367,6 +375,7 @@ function harness(
       viewAttachment: vi.fn(async (_id: number) => {}),
     },
   } satisfies LibraryOwner;
+  let host: WorkspaceHost | undefined;
   return {
     zotero,
     owner,
@@ -385,7 +394,9 @@ function harness(
       for (const { observer, types } of observers)
         if (types.includes(type)) observer.notify(action, type, ids);
     },
-    host: createWorkspaceHost(zotero, prefs, owner),
+    get host() {
+      return (host ??= createWorkspaceHost(zotero, prefs, owner));
+    },
   };
 }
 
@@ -396,6 +407,97 @@ const stage = {
 } satisfies Property;
 
 describe('Zotero Bases host', () => {
+  it.each([
+    ['zh-CN', 'en-US', '全部文献', '阅读阶段', '评分', '代码/主页'],
+    ['en-US', 'zh-CN', 'All Literature', 'Reading Stage', 'Rating', 'Code / Home'],
+    ['auto', 'fr-FR', 'All Literature', 'Reading Stage', 'Rating', 'Code / Home'],
+  ] as const)(
+    'seeds the resolved language %s with Zotero locale %s without writing any items',
+    async (choice, locale, tableName, stageKey, ratingKey, codeKey) => {
+      const before = 'DOI: preserve\r\nFree text';
+      const item = nativeItem(1, 8, before);
+      const setField = vi.spyOn(item, 'setField');
+      const raw = new Map<string, string>();
+      const { zotero, owner, prefs } = harness([item], [item], [], raw);
+      const global = createGlobalPreferenceStore(prefs);
+      global.set('language', choice);
+      global.set('defaultDensity', 'wrap');
+
+      const host = createWorkspaceHost(zotero, prefs, owner, locale);
+      const settings = host.settings();
+      expect(settings.properties.map(({ key }) => key)).toEqual([stageKey, ratingKey, codeKey]);
+      expect(settings.views[0]).toMatchObject({
+        name: tableName,
+        scope: 'group:73/CHILD007',
+        density: 'wrap',
+      });
+      expect(await host.load(settings.views[0]!.scope)).toMatchObject({
+        rows: [{ extra: before }],
+      });
+      expect(item.savedExtra()).toBe(before);
+      expect(setField).not.toHaveBeenCalled();
+      expect(item.saveTx).not.toHaveBeenCalled();
+
+      await host.setProperty(item.id, ratingKey, '4');
+      expect(setField).toHaveBeenCalledExactlyOnceWith('extra', `${before}\r\n${ratingKey}: 4`);
+      expect(item.savedExtra()).toBe(`${before}\r\n${ratingKey}: 4`);
+      expect(item.saveTx).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['sync', 'backup'] as const)(
+    'keeps a %s snapshot restored before opening any workspace, without rewriting Extra',
+    async (source) => {
+      const originalExtra = 'DOI: unchanged\nOriginal note';
+      const item = nativeItem(1, 1, originalExtra);
+      const setField = vi.spyOn(item, 'setField');
+      const raw = new Map<string, string>();
+      const { zotero, owner, prefs } = harness([item], [], [], raw);
+      const { validate } = createPropertyValidation(zotero);
+      const snapshot = {
+        schema: [],
+        views: [
+          {
+            id: 'restored',
+            name: 'Restored view',
+            scope: 'user',
+            columns: ['title'],
+            sorts: [],
+            filters: [],
+          },
+        ],
+      };
+      const write = vi.spyOn(prefs, 'set');
+      if (source === 'sync') {
+        const config = createConfig(prefs, () => 'user', validate, { initializeDefault: false });
+        expect(config.settings().active).toBe('default');
+        expect(write).not.toHaveBeenCalled();
+        config.applySync(decodeSyncSnapshot(snapshot, validate)!);
+      } else {
+        const backup = createConfigurationBackup(prefs, validate);
+        backup.exportJSON();
+        expect(write).not.toHaveBeenCalled();
+        expect(backup.importJSON(JSON.stringify(snapshot))).toEqual({ views: 1, properties: 0 });
+      }
+      const restored = [...raw];
+      expect(write.mock.calls.map(([key]) => key)).toEqual([SCHEMA_PREF, VIEWS_PREF]);
+      write.mockClear();
+
+      const host = createWorkspaceHost(zotero, prefs, owner, 'zh-CN');
+      expect(host.settings()).toEqual({
+        properties: snapshot.schema,
+        views: snapshot.views,
+        active: 'restored',
+      });
+      expect([...raw]).toEqual(restored);
+      expect(write).not.toHaveBeenCalled();
+      expect(await host.load('user')).toMatchObject({ rows: [{ extra: originalExtra }] });
+      expect(item.savedExtra()).toBe(originalExtra);
+      expect(setField).not.toHaveBeenCalled();
+      expect(item.saveTx).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses native scope identifiers and loads a global native tag catalog independent of rows', async () => {
     const pdf = nativeItem(3, 8, '', { parentID: 1, attachment: 'pdf' });
     const paper = nativeItem(1, 8, 'Reading Stage: To Read', { attachments: [3], best: pdf });

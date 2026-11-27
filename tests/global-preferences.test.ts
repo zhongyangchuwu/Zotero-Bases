@@ -24,12 +24,10 @@ describe('global preferences', () => {
     expect(store.read()).toEqual({
       appearance: 'classic',
       customCSS: '',
-      showShortcuts: true,
       openMode: 'tab',
       defaultDensity: 'compact',
       authorFormat: 'etAl',
       language: 'auto',
-      keyboardFlow: true,
     });
     expect([...values]).toEqual(legacy);
 
@@ -38,7 +36,7 @@ describe('global preferences', () => {
     for (const [name, value] of legacy) expect(values.get(name)).toBe(value);
   });
 
-  it('retains valid partial settings and defaults malformed fields independently', () => {
+  it('ignores retired shortcuts without rewriting stored preferences and reads live fields', () => {
     const { prefs, values } = preferences();
     values.set(
       key,
@@ -50,23 +48,24 @@ describe('global preferences', () => {
         defaultDensity: 'wrap',
         authorFormat: null,
         language: 'zh-CN',
-        keyboardFlow: 'false',
+        keyboardFlow: false,
       }),
     );
     const store = createGlobalPreferenceStore(prefs);
+    const before = values.get(key);
     expect(store.read()).toEqual({
       ...DEFAULT_GLOBAL_PREFERENCES,
       appearance: 'terminal',
-      showShortcuts: false,
       defaultDensity: 'wrap',
       language: 'zh-CN',
     });
+    expect(values.get(key)).toBe(before);
     store.set('customCSS', ':scope { --zb-accent: red; }');
     expect(store.read()).toMatchObject({
       appearance: 'terminal',
-      showShortcuts: false,
       customCSS: ':scope { --zb-accent: red; }',
     });
+    expect(JSON.parse(values.get(key) as string)).toEqual(store.read());
   });
 
   const invalid = [undefined, false, 'null', '[]', '"wrong type"', '{'];
@@ -86,10 +85,10 @@ describe('global preferences', () => {
     const detachTab = store.subscribe(tab);
     const detachPopup = store.subscribe(popup);
 
-    fromOtherSurface.set('keyboardFlow', false);
+    fromOtherSurface.set('authorFormat', 'singleLine');
     expect(tab).toHaveBeenCalledExactlyOnceWith({
       ...DEFAULT_GLOBAL_PREFERENCES,
-      keyboardFlow: false,
+      authorFormat: 'singleLine',
     });
     expect(popup).toHaveBeenCalledExactlyOnceWith(store.read());
     detachTab();

@@ -19,6 +19,7 @@ import type {
 import { createPropertyValidation } from '../src/data';
 import { writeProperty } from '../src/extra';
 import {
+  createGlobalPreferenceStore,
   DEFAULT_GLOBAL_PREFERENCES,
   type GlobalPreferenceStore,
   type GlobalPreferences,
@@ -325,14 +326,25 @@ describe('Zotero Bases workspace', () => {
   it('writes view controls immediately and keeps a focused filter input through settings notifications', async () => {
     const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }]);
     const popOut = vi.fn();
-    const { root } = attach(host, { language: 'en', popOut });
+    const global = createGlobalPreferenceStore(preferences().prefs);
+    global.set('defaultDensity', 'comfortable');
+    const { root } = attach(host, { language: 'en', popOut, global });
     await settle();
     click(root, 'Open in new window');
     expect(popOut).toHaveBeenCalledTimes(1);
     click(root, 'New view');
     click(root, 'New table view');
     const created = active(host);
-    expect(created).toMatchObject({ name: 'New view', scope: 'personal' });
+    expect(created).toMatchObject({
+      name: 'New view',
+      scope: 'personal',
+      density: 'comfortable',
+      frozenCount: 1,
+      sorts: [
+        { column: 'added', direction: 'desc' },
+        { column: 'title', direction: 'asc' },
+      ],
+    });
     expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('New view');
     changeSelection(root, 'Scope', 'group');
     expect(active(host).scope).toBe('group');
@@ -342,8 +354,11 @@ describe('Zotero Bases workspace', () => {
     get<HTMLInputElement>(root, 'input[data-focus="year"]').click();
     expect(active(host).columns).not.toContain('year');
     openTool(root, 'Sort');
-    changeSelection(root, 'Sort direction · 1', 'desc');
-    expect(active(host).sorts).toEqual([{ column: 'title', direction: 'desc' }]);
+    changeSelection(root, 'Sort direction · 1', 'asc');
+    expect(active(host).sorts).toEqual([
+      { column: 'added', direction: 'asc' },
+      { column: 'title', direction: 'asc' },
+    ]);
     openTool(root, 'Filters');
     click(root, 'Add condition');
     expect(active(host).filters).toEqual([{ column: 'title', operator: 'has', value: '' }]);
@@ -430,7 +445,10 @@ describe('Zotero Bases workspace', () => {
     await settle();
     click(root, 'New view');
     click(root, 'New board view');
-    expect(active(host).layout).toBe('board');
+    expect(active(host)).toMatchObject({
+      layout: 'board',
+      board: { cardFields: ['creators', 'year', 'tags', 'pdf'], hideEmptyLanes: false },
+    });
     const emptyBoard = get(root, '.zb-board');
     get<HTMLButtonElement>(emptyBoard, 'button').click();
     expect(get(root, '.zb-popover').getAttribute('aria-label')).toBe('Properties');
@@ -469,6 +487,7 @@ describe('Zotero Bases workspace', () => {
     await settle();
     const card = () => get(root, '.zb-board-card[data-item-id="1"]');
     const board = get(root, '.zb-board');
+    expect(get(root, '.zb-table-status').textContent).toBe('1 items');
     const search = get<HTMLInputElement>(root, 'input[role="searchbox"]');
     search.focus();
     expect(focusedKey('5')).toBe(true);
@@ -699,11 +718,21 @@ describe('Zotero Bases workspace', () => {
     const { root } = attach(host);
     await settle();
     cell(root, 'property:Impact').focus();
+    expect(focusedKey('Enter')).toBe(false);
+    expect(document.activeElement).toBe(get(cell(root, 'property:Impact'), '[data-rating="1"]'));
+    expect(focusedKey('4')).toBe(true);
+    expect(focusedKey('Enter')).toBe(true);
+    expect(focusedKey(' ')).toBe(true);
+    openTool(root, 'Filters');
+    cell(root, 'property:Impact').focus();
+    expect(focusedKey('4')).toBe(true);
+    expect(focusedKey('Escape')).toBe(false);
     expect(focusedKey('4', { isComposing: true })).toBe(true);
     expect(focusedKey('4', { repeat: true })).toBe(true);
     expect(focusedKey('4', { ctrlKey: true })).toBe(true);
     expect(focusedKey('4', { altKey: true })).toBe(true);
     expect(focusedKey('4', { metaKey: true })).toBe(true);
+    expect(focusedKey('4', { shiftKey: true })).toBe(true);
     expect(host.setProperty).not.toHaveBeenCalled();
     expect(focusedKey('4')).toBe(false);
     await settle();
@@ -718,6 +747,9 @@ describe('Zotero Bases workspace', () => {
     expect(focusedKey('3')).toBe(true);
     cell(root, 'property:ReadOn').focus();
     focusedKey('Enter');
+    const editor = get(root, '.zb-editor input');
+    expect(focusedKey('f', { ctrlKey: true })).toBe(true);
+    expect(document.activeElement).toBe(editor);
     expect(focusedKey('3')).toBe(true);
     focusedKey('Escape');
     expect(host.setProperty).toHaveBeenCalledTimes(2);
@@ -788,12 +820,12 @@ describe('Zotero Bases workspace', () => {
       () => new DOMRect(286 - viewport.scrollLeft, 35, 120, 35),
     );
     cell(root, 'title').focus();
-    focusedKey('l');
+    expect(focusedKey('ArrowRight')).toBe(false);
     expect(document.activeElement).toBe(year);
     expect(year.getBoundingClientRect().left).toBe(286);
     viewport.dispatchEvent(new Event('scroll'));
     expect(viewport.hasAttribute('data-frozen-shadow')).toBe(false);
-    focusedKey('G', { shiftKey: true });
+    await scrollGrid(viewport, 20_000);
     expect(rowIds(root).at(-1)).toBe(320);
     expect(cell(root, 'title', 320).style.getPropertyValue('--zb-frozen-offset')).toBe('36px');
 
@@ -855,10 +887,13 @@ describe('Zotero Bases workspace', () => {
     expect(document.activeElement).toBe(doi);
     expect(doi.hasAttribute('data-active-cell')).toBe(true);
     key(doi, 'Enter');
-    key(doi, 'i');
+    expect(key(doi, 'i')).toBe(true);
     expect(open).not.toHaveBeenCalled();
     expect(copy).not.toHaveBeenCalled();
     const links = [...doi.querySelectorAll<HTMLButtonElement>('.zb-link-control')];
+    links[0]!.focus();
+    expect(focusedKey('Enter')).toBe(true);
+    expect(focusedKey(' ')).toBe(true);
     expect(links.map(({ tabIndex }) => tabIndex)).toEqual([0, 0]);
     doi.querySelector<HTMLButtonElement>('.zb-link-control[aria-label^="Copy DOI"]')!.click();
     expect(copy).toHaveBeenCalledExactlyOnceWith('10.1000/fixture');
@@ -1106,6 +1141,10 @@ describe('Zotero Bases workspace', () => {
       rowSelection(root, 1).click();
       openTool(root, 'Filters');
       const filters = get(root, 'button[title="Filters"]');
+      const filterFocus = document.activeElement;
+      expect(focusedKey('f', { ctrlKey: true })).toBe(true);
+      expect(document.activeElement).toBe(filterFocus);
+      expect(filters.getAttribute('aria-expanded')).toBe('true');
       expect(focusedKey('Escape')).toBe(false);
       expect(document.activeElement).toBe(filters);
       expect(search.value).toBe('Alpha');
@@ -1142,22 +1181,20 @@ describe('Zotero Bases workspace', () => {
       expect(rowIds(root).length).toBeLessThan(40);
       expect(rowIds(root)).not.toContain(65);
       get(root, '.zb-table-wrap').focus();
-      focusedKey('G', { shiftKey: true });
-      expect(rowIds(root)).toContain(65);
-      expect(cell(root, 'creators', 65).textContent).not.toContain('Hidden Author');
       const search = get<HTMLInputElement>(root, '[role=searchbox]');
-      focusedKey('/');
+      expect(focusedKey('f', { ctrlKey: true })).toBe(false);
       expect(document.activeElement).toBe(search);
       type(search, 'Hidden Author');
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([65]);
+      expect(cell(root, 'creators', 65).textContent).not.toContain('Hidden Author');
       expect(groupTitles(root)).toEqual(['2026 (1)']);
-      expect(get(root, '.zb-table-status').textContent).toContain('Matched 1 / 65 items');
+      expect(get(root, '.zb-table-status').textContent).toBe('Matched 1 / 65 items');
 
       type(search, 'not present');
       await vi.advanceTimersByTimeAsync(300);
       expect(rowIds(root)).toEqual([]);
-      expect(get(root, '.zb-table-status').textContent).toContain('Matched 0 / 65 items');
+      expect(get(root, '.zb-table-status').textContent).toBe('Matched 0 / 65 items');
       key(search, 'Escape');
       expect(rowIds(root)).toContain(1);
       expect(rowIds(root)).not.toContain(65);
@@ -1179,6 +1216,9 @@ describe('Zotero Bases workspace', () => {
       const search = get<HTMLInputElement>(root, '[role=searchbox]');
       const field = get(root, `#${trigger.getAttribute('aria-controls')}`);
       const grid = get(root, '.zb-table-wrap');
+      expect(search.placeholder).toBe('Search this scope');
+      expect(search.hasAttribute('aria-keyshortcuts')).toBe(false);
+      expect(trigger.hasAttribute('aria-keyshortcuts')).toBe(false);
       expect(field.hidden).toBe(true);
       trigger.click();
       expect(document.activeElement).toBe(search);
@@ -1189,9 +1229,35 @@ describe('Zotero Bases workspace', () => {
       expect(field.hidden).toBe(true);
       expect(rowIds(root)).toEqual([2]);
 
-      key(grid, '/');
+      const outside = document.body.appendChild(document.createElement('button'));
+      cleanups.push(() => outside.remove());
+      outside.focus();
+      expect(focusedKey('f', { ctrlKey: true })).toBe(true);
+      expect(key(grid, 'f', { ctrlKey: true })).toBe(true);
+      expect(document.activeElement).toBe(outside);
+      const surface = get(root, '.zb-workspace');
+      surface.focus();
+      expect(key(outside, 'f', { metaKey: true })).toBe(true);
+      expect(focusedKey('/')).toBe(true);
+      for (const flags of [
+        { ctrlKey: true, metaKey: true },
+        { ctrlKey: true, altKey: true },
+        { ctrlKey: true, shiftKey: true },
+        { ctrlKey: true, isComposing: true },
+        { ctrlKey: true, repeat: true },
+      ]) {
+        expect(focusedKey('f', flags)).toBe(true);
+      }
+      expect(document.activeElement).toBe(surface);
+      expect(field.hidden).toBe(true);
+      expect(focusedKey('f', { metaKey: true })).toBe(false);
       expect(field.hidden).toBe(false);
       expect(document.activeElement).toBe(search);
+      expect(search.value).toBe('Beta');
+      expect([search.selectionStart, search.selectionEnd]).toEqual([0, 4]);
+      search.setSelectionRange(2, 2);
+      expect(focusedKey('f', { ctrlKey: true })).toBe(false);
+      expect([search.selectionStart, search.selectionEnd]).toEqual([0, 4]);
       for (const narrow of [false, true]) {
         media.matches = narrow;
         media.dispatchEvent(new Event('change'));
@@ -1201,6 +1267,7 @@ describe('Zotero Bases workspace', () => {
         expect(rowIds(root)).toEqual([2]);
       }
       key(search, 'Escape');
+      expect(field.hidden).toBe(false);
       expect(rowIds(root)).toEqual([1, 2]);
       key(search, 'Escape');
       expect(field.hidden).toBe(true);
@@ -1211,7 +1278,7 @@ describe('Zotero Bases workspace', () => {
     }
   });
 
-  it('updates both surfaces without losing search, and disables only grid shortcuts', async () => {
+  it('updates both surfaces without losing search or changing keyboard navigation', async () => {
     let current = DEFAULT_GLOBAL_PREFERENCES;
     const subscribers = new Set<(value: GlobalPreferences) => void>();
     const global: GlobalPreferenceStore = {
@@ -1256,14 +1323,8 @@ describe('Zotero Bases workspace', () => {
 
       const second = cell(floating.root, 'title', 2);
       second.focus();
-      global.set('keyboardFlow', false);
-      expect(key(second, 'k')).toBe(true);
-      expect(key(second, 'x')).toBe(true);
-      expect(document.activeElement).toBe(second);
-      expect(rowSelection(floating.root, 2).checked).toBe(false);
-      global.set('keyboardFlow', true);
-      expect(key(second, 'x')).toBe(false);
-      expect(rowSelection(floating.root, 2).checked).toBe(true);
+      expect(focusedKey('ArrowUp')).toBe(false);
+      expect(document.activeElement).toBe(cell(floating.root, 'title'));
     } finally {
       vi.useRealTimers();
     }
@@ -1302,6 +1363,64 @@ describe('Zotero Bases workspace', () => {
     restored.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(restored.getAttribute('aria-valuenow')).toBe(String(start));
     expect(active(host).columnWidths?.title).toBeUndefined();
+  });
+
+  it('fits nine starter columns in a 1080p tab at 150% scaling and freezes the title', async () => {
+    const { prefs } = preferences();
+    const config = createConfig(prefs, () => 'personal', validate, { language: 'zh-CN' });
+    const settings = config.settings();
+    const view = settings.views[0]!;
+    const { host } = fixture([sample], view, settings.properties);
+    const { root } = attach(host, { language: 'zh-CN' });
+    const viewport = get(root, '.zb-table-wrap');
+    Object.defineProperty(viewport, 'clientWidth', { value: 1260 });
+    const rect = vi
+      .spyOn(HTMLTableCellElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLTableCellElement) {
+        return new DOMRect(0, 0, this.cellIndex === 0 ? 36 : 260, 30);
+      });
+    try {
+      await settle();
+      expect(root.querySelectorAll('thead [data-header-column]')).toHaveLength(9);
+      expect(parseFloat(get(root, 'table').style.width)).toBeLessThan(viewport.clientWidth);
+      expect(cell(root, 'title').hasAttribute('data-frozen-end')).toBe(true);
+      expect(cell(root, 'creators').hasAttribute('data-frozen')).toBe(false);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('uses type-specific column widths and restores only the selected override', async () => {
+    const { host } = fixture(
+      [sample],
+      {
+        ...defaultView,
+        columns: [
+          'title',
+          'property:Impact',
+          'property:Status',
+          'property:Repository',
+          'property:ReadOn',
+          'property:Memo',
+        ],
+        columnWidths: { title: 275, 'property:Impact': 204 },
+      },
+      [...properties, ...researchProperties],
+    );
+    const { root } = attach(host);
+    await settle();
+    const width = (column: Column) => get(root, `col[data-column="${column}"]`).style.width;
+
+    expect(width('title')).toBe('275px');
+    expect(width('property:Impact')).toBe('204px');
+    expect(width('property:Status')).toBe('120px');
+    expect(width('property:Repository')).toBe('160px');
+    expect(width('property:ReadOn')).toBe('112px');
+    expect(width('property:Memo')).toBe('140px');
+    header(root, 'property:Impact').click();
+    click(root, 'Restore default width');
+    expect(width('property:Impact')).toBe('120px');
+    expect(active(host).columnWidths).toEqual({ title: 275 });
   });
 
   it('keeps valid results and removes all unavailable conditions with one action', async () => {
@@ -1400,12 +1519,11 @@ describe('Zotero Bases workspace', () => {
     click(root, 'Alpha 1');
     expect(host.openItem).toHaveBeenLastCalledWith(1, false);
     cell(root, 'year').focus();
-    focusedKey('o');
-    expect(host.openItem).toHaveBeenLastCalledWith(1, true);
+    expect(focusedKey('o')).toBe(true);
+    expect(host.openItem).toHaveBeenCalledTimes(1);
     cell(root, 'year').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(host.openItem.mock.calls).toEqual([
       [1, false],
-      [1, true],
       [1, true],
     ]);
   });
@@ -1478,7 +1596,7 @@ describe('Zotero Bases workspace', () => {
     expect(root.textContent).toContain('Updated 1 items; skipped 1.');
   });
 
-  it('bounds the mounted window, jumps across the full list, and resets the viewport on sort', async () => {
+  it('bounds the mounted window, follows arrows at the end, and resets the viewport on sort', async () => {
     const rows = Array.from({ length: 113 }, (_, index) => ({
       ...sample,
       id: index + 1,
@@ -1490,19 +1608,14 @@ describe('Zotero Bases workspace', () => {
     const viewport = get(root, '.zb-table-wrap');
     expect(rowIds(root)).toContain(1);
     expect(rowIds(root).length).toBeLessThan(40);
-    expect(get(root, '.zb-table-status').textContent).toContain('113 items');
-    viewport.focus();
-    focusedKey('G', { shiftKey: true });
+    expect(get(root, '.zb-table-status').textContent).toBe('113 items');
+    await scrollGrid(viewport, 20_000);
     expect(rowIds(root).at(-1)).toBe(113);
     expect(rowIds(root)).not.toContain(1);
+    cell(root, 'title', 112).focus();
+    expect(focusedKey('ArrowDown', { repeat: true })).toBe(false);
     expect(document.activeElement).toBe(cell(root, 'title', 113));
-    focusedKey('g');
-    focusedKey('g');
-    expect(document.activeElement).toBe(cell(root, 'title', 1));
-    focusedKey('PageDown');
-    expect(viewport.scrollTop).toBeGreaterThan(0);
-    focusedKey('u', { ctrlKey: true });
-    expect(document.activeElement).toBe(cell(root, 'title', 1));
+    expect(focusedKey('PageDown')).toBe(true);
     header(root, 'title').click();
     click(root, 'Sort descending');
     expect(active(host).sorts).toEqual([{ column: 'title', direction: 'desc' }]);
@@ -1551,7 +1664,7 @@ describe('Zotero Bases workspace', () => {
     }
   });
 
-  it('moves between cells and edits immediately without claiming the Space leader', async () => {
+  it('moves and activates cells with plain keys, and cancels before exiting table focus', async () => {
     const { host } = fixture([sample, { ...sample, id: 2, title: 'Beta' }], {
       ...defaultView,
       columns: ['title', 'property:Score', 'property:Reviewed', 'property:Status'],
@@ -1561,10 +1674,12 @@ describe('Zotero Bases workspace', () => {
     cell(root, 'title').focus();
     expect(focusedKey(' ')).toBe(true);
     expect(rowSelection(root, 1).checked).toBe(false);
-    focusedKey('j');
+    expect(focusedKey('ArrowDown', { shiftKey: true })).toBe(true);
+    expect(document.activeElement).toBe(cell(root, 'title'));
+    expect(focusedKey('ArrowDown')).toBe(false);
     expect(document.activeElement).toBe(cell(root, 'title', 2));
-    focusedKey('k');
-    focusedKey('l');
+    expect(focusedKey('ArrowUp')).toBe(false);
+    expect(focusedKey('ArrowRight')).toBe(false);
     expect(document.activeElement).toBe(cell(root, 'property:Score'));
     focusedKey('Enter');
     const field = document.activeElement as HTMLInputElement;
@@ -1572,7 +1687,8 @@ describe('Zotero Bases workspace', () => {
     focusedKey('Escape');
     expect(host.setProperty).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(cell(root, 'property:Score'));
-    focusedKey('i');
+    expect(focusedKey('i')).toBe(true);
+    expect(focusedKey('Enter')).toBe(false);
     type(document.activeElement as HTMLInputElement, '17.5');
     focusedKey('Enter');
     await settle();
@@ -1582,21 +1698,31 @@ describe('Zotero Bases workspace', () => {
     focusedKey('Enter');
     await settle();
     expect(host.setProperty).toHaveBeenLastCalledWith(1, 'Reviewed', true);
-    focusedKey('l');
+    focusedKey('ArrowRight');
     focusedKey('Enter');
     expect(document.activeElement?.textContent).toBe('Reading');
     focusedKey('ArrowDown');
-    focusedKey('Enter');
+    expect(focusedKey('Enter')).toBe(true);
+    // jsdom does not generate the button click for native keyboard activation.
+    (document.activeElement as HTMLButtonElement).click();
     await settle();
     expect(host.setProperty).toHaveBeenLastCalledWith(1, 'Status', 'Done');
     expect(document.activeElement).toBe(cell(root, 'property:Status'));
-    focusedKey('o');
-    expect(host.openItem).toHaveBeenLastCalledWith(1, true);
-    focusedKey('h');
-    focusedKey('h');
-    focusedKey('h');
+    for (let step = 0; step < 3; step++) focusedKey('ArrowLeft');
     focusedKey('Enter');
     expect(host.openItem).toHaveBeenLastCalledWith(1, false);
+    const title = cell(root, 'title');
+    const table = get(root, '.zb-table-wrap');
+    rowSelection(root, 1).click();
+    title.focus();
+    expect(focusedKey('Escape', { repeat: true })).toBe(true);
+    expect(focusedKey('Escape', { shiftKey: true })).toBe(true);
+    expect(rowSelection(root, 1).checked).toBe(true);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(rowSelection(root, 1).checked).toBe(false);
+    expect(document.activeElement).toBe(title);
+    expect(focusedKey('Escape')).toBe(false);
+    expect(table.contains(document.activeElement)).toBe(false);
   });
 
   it('saves a draft exactly once on eviction and restores the active cell and selection on return', async () => {
@@ -1611,7 +1737,7 @@ describe('Zotero Bases workspace', () => {
     const viewport = get(root, '.zb-table-wrap');
     const original = cell(root, 'property:Memo');
     original.focus();
-    focusedKey('x');
+    rowSelection(root, 1).click();
     focusedKey('Enter');
     type(document.activeElement as HTMLInputElement, 'Save before recycling');
     await scrollGrid(viewport, 7200);
@@ -1626,7 +1752,7 @@ describe('Zotero Bases workspace', () => {
     expect(remounted.hasAttribute('data-active-cell')).toBe(true);
     expect(remounted.textContent).toBe('Save before recycling');
     expect(rowSelection(root, 1).checked).toBe(true);
-    focusedKey('x');
+    rowSelection(root, 1).click();
     expect(rowSelection(root, 1).checked).toBe(false);
   });
 
@@ -1757,25 +1883,30 @@ describe('Zotero Bases workspace', () => {
     const { root } = attach(host);
     await settle();
     expect(groupTitles(root)).toEqual(['2023 (62)']);
-    get(root, '.zb-table-wrap').focus();
-    focusedKey('g');
-    focusedKey('g');
-    focusedKey('h');
+    cell(root, 'title').focus();
+    expect(focusedKey('ArrowUp')).toBe(false);
     const firstGroup = '[aria-label="2023 (62)"]';
+    get(root, firstGroup).focus();
+    expect(focusedKey('Enter')).toBe(true);
+    expect(focusedKey('ArrowLeft')).toBe(false);
     expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('false');
     expect(rowIds(root)[0]).toBe(63);
     expect(root.textContent).toContain('115 items');
-    focusedKey('l');
+    expect(focusedKey('ArrowRight')).toBe(false);
     expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('true');
     expect(rowIds(root)[0]).toBe(1);
-    focusedKey('Enter');
+    expect(focusedKey('Enter')).toBe(false);
     expect(get(root, firstGroup).getAttribute('aria-expanded')).toBe('false');
-    focusedKey('G', { shiftKey: true });
+    expect(focusedKey('ArrowDown')).toBe(false);
+    expect(document.activeElement).toBe(get(root, '[aria-label="2024 (51)"]').closest('td'));
+    expect(focusedKey('ArrowDown')).toBe(false);
+    expect(document.activeElement).toBe(cell(root, 'title', 63));
+    await scrollGrid(get(root, '.zb-table-wrap'), 20_000);
     expect(rowIds(root).at(-1)).toBe(115);
     expect(groupTitles(root)).toContain('No value (2)');
   });
 
-  it('extends keyboard and Shift-click ranges across unmounted grouped rows', async () => {
+  it('selects Shift-click ranges across unmounted grouped rows and only counts selections in the bulk bar', async () => {
     const rows = Array.from({ length: 320 }, (_, index) => ({
       ...sample,
       id: index + 1,
@@ -1789,33 +1920,32 @@ describe('Zotero Bases workspace', () => {
     });
     const { root } = attach(host);
     await settle();
-    const first = cell(root, 'title', 5);
-    first.focus();
-    focusedKey('x');
-    for (let i = 0; i < 235; i++) focusedKey('J', { shiftKey: true });
-    expect(document.activeElement).toBe(cell(root, 'title', 240));
-    expect(get(root, '.zb-table-status').textContent).toContain('236 selected');
+    rowSelection(root, 5).click();
+    const viewport = get(root, '.zb-table-wrap');
+    const bulk = get(root, '[aria-label="Bulk edit"]');
+    const footer = get(root, '.zb-table-status');
+    await scrollGrid(viewport, 7800);
     expect(rowIds(root)).not.toContain(5);
-    focusedKey('K', { shiftKey: true });
-    expect(document.activeElement).toBe(cell(root, 'title', 239));
     const title = get<HTMLButtonElement>(cell(root, 'title', 235), 'button');
     title.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }),
     );
     expect(host.openItem).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(cell(root, 'title', 235));
-    focusedKey('G', { shiftKey: true });
+    expect(bulk.textContent).toContain('231 selected');
+    expect(footer.textContent).toBe('320 items');
+    await scrollGrid(viewport, 20_000);
     rowSelection(root, 320).dispatchEvent(
       new MouseEvent('click', { bubbles: true, shiftKey: true }),
     );
-    expect(get(root, '.zb-table-status').textContent).toContain('316 selected');
+    expect(bulk.textContent).toContain('316 selected');
+    expect(footer.textContent).toBe('320 items');
     expect(selectAllInput(root).indeterminate).toBe(true);
 
     selectAllInput(root).click();
     expect(root.textContent).toContain('320 selected');
     expect(selectAllInput(root).checked).toBe(true);
     expect(selectAllInput(root).indeterminate).toBe(false);
-    const bulk = get(root, '[aria-label="Bulk edit"]');
     type(get(bulk, '[aria-label="Bulk tag"]'), 'existing');
     click(bulk, 'Add tag');
     const [ids, change] = host.bulk.mock.calls[0]!;

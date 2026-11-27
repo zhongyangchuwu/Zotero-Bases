@@ -744,7 +744,6 @@ export const workspaceCSS = String.raw`
   color: var(--zb-muted);
   font-variant-numeric: tabular-nums;
 }
-.zb-workspace .zb-table-keys { font-size: 0.95em; }
 
 .zb-workspace[data-appearance='terminal'] {
   --zb-bg: light-dark(#f8fafc, #10151e);

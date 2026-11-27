@@ -1,5 +1,4 @@
 import {
-  DEFAULT_COLUMNS,
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTH,
   NATIVE_COLUMN_BY_KEY,
@@ -62,6 +61,7 @@ import { mountSyncBadge } from './sync-controls';
 import { workspaceCSS } from './workspace.css';
 import { TableKeys, type TableCommand } from './table-keys';
 import { resolveTagColors } from './tag-colors';
+import { createViewDefaults } from './view-defaults';
 import { flattenRows, VirtualLayout, type VirtualRow } from './virtual-layout';
 
 const OVERSCAN = 170;
@@ -72,14 +72,8 @@ const COLUMN_ACTION_WIDTH = 40;
 const PALETTE = ['amber', 'red', 'green', 'sky', 'violet', 'rose', 'orange', 'neutral'] as const;
 const RATING_VALUES = ['1', '2', '3', '4', '5'] as const;
 const GRID_CONTROLS = '.zb-link-control, .zb-url-edit, [data-rating]';
+const EDITABLE_KEYS = 'input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor';
 
-function defaultColumnWidth(column: Column): number {
-  return isNativeColumn(column) ? NATIVE_COLUMN_BY_KEY[column].defaultWidth : 140;
-}
-
-function columnWidth(view: View, column: Column): number {
-  return view.columnWidths?.[column] ?? defaultColumnWidth(column);
-}
 const PROPERTY_TYPES: readonly PropertyType[] = [
   'text',
   'number',
@@ -106,10 +100,6 @@ const words = {
   hideEmptyLanes: ['Hide empty lanes', '隐藏空泳道'],
   expandLanes: ['Expand all lanes', '展开全部泳道'],
   collapseLanes: ['Collapse all lanes', '折叠全部泳道'],
-  boardKeyboardHint: [
-    '←/→ Lanes · ↑/↓ Cards · 1–5 / 0 Rate / clear · Enter Locate · Esc Exit focus',
-    '←/→ 换泳道 · ↑/↓ 换卡片 · 1–5／0 评分／清空 · Enter 定位 · Esc 退出焦点',
-  ],
   copyView: ['Copy view', '复制视图'],
   renameView: ['Rename view', '重命名视图'],
   deleteView: ['Delete view', '删除视图'],
@@ -278,10 +268,6 @@ const words = {
   bulkTag: ['Bulk tag', '批量编辑的标签'],
   noItems: ['No matching items', '没有匹配条目'],
   noColumns: ['No visible columns. Choose columns above.', '没有可见列，请在上方选择要显示的列。'],
-  keyboardHint: [
-    'hjkl / arrows Move · Enter Edit / open · 1–5 / 0 Rate / clear · x Select · o Open PDF · / Search',
-    'hjkl／方向键 移动 · Enter 编辑／打开 · 1–5／0 评分／清空 · x 勾选 · o 打开 PDF · / 搜索',
-  ],
   loadError: ['Items could not be loaded.', '无法加载条目。'],
   retry: ['Retry', '重试'],
   actionError: ['Could not save this change.', '无法保存此项更改。'],
@@ -290,7 +276,6 @@ const words = {
     '无法保存。请检查属性键或选项名是否有效，以及是否已被使用。',
   ],
   openError: ['Could not open this item.', '无法打开该条目。'],
-  noPDF: ['No PDF attachment.', '没有 PDF 附件。'],
 } as const;
 
 let nextId = 0;
@@ -425,7 +410,6 @@ function mountWorkspaceSurface(
   let positionEditor: (() => void) | undefined;
   let renderedCardFields: readonly Column[] = [];
   let cardRevision = 0;
-  const keyTarget: EventTarget = window ?? root;
   const pendingRenders = new Map<HTMLElement, EventListener>();
   const cells = createCellRenderers(doc, {
     text: t,
@@ -554,6 +538,7 @@ function mountWorkspaceSurface(
   style.textContent = workspaceCSS + popoverCSS + boardCSS + boardCardsCSS;
   const customStyle = element('style');
   const surface = element('section', 'zb-workspace');
+  surface.tabIndex = -1;
   surface.lang = options.language;
   const popovers = createPopover(surface);
   const headerMenu = createPane(t('columnMenu'), 'zb-view-action-list');
@@ -684,11 +669,9 @@ function mountWorkspaceSurface(
   searchToggle.setAttribute('aria-controls', searchField.id);
   searchToggle.setAttribute('aria-expanded', 'false');
   searchToggle.toggleAttribute('data-filtering', !!searchTerm);
-  searchToggle.setAttribute('aria-keyshortcuts', '/');
   const search = input(t('search'), restored?.search);
   search.setAttribute('role', 'searchbox');
-  search.setAttribute('aria-keyshortcuts', '/');
-  search.placeholder = `${t('search')}  /`;
+  search.placeholder = t('search');
   const clearSearchButton = button(
     '×',
     () => {
@@ -776,16 +759,13 @@ function mountWorkspaceSurface(
       void board.rate(row, property, value).catch(() => {});
     },
   });
-  const tableStatus = element('div', 'zb-table-status');
+  const count = element('div', 'zb-table-status');
   const tagValues = element('datalist');
   tagValues.id = `${mountId}-filter-tags`;
-  const count = element('span');
   count.setAttribute('aria-live', 'polite');
-  const keyHints = element('span', 'zb-table-keys', t('keyboardHint'));
-  tableStatus.append(count, keyHints);
   const rowProbe = element('span', 'zb-row-probe');
   rowProbe.setAttribute('aria-hidden', 'true');
-  panel.append(toolbar, warning, bulkBar, status, tableWrap, boardRoot, tableStatus);
+  panel.append(toolbar, warning, bulkBar, status, tableWrap, boardRoot, count);
   surface.append(top, panel, tagValues, rowProbe);
   root.append(style, customStyle, surface);
   updateAppearance();
@@ -802,8 +782,7 @@ function mountWorkspaceSurface(
     queueSearch();
   });
   search.addEventListener('input', queueSearch);
-  // Run before Zotero and other add-ons' document handlers, but only consume our keys.
-  keyTarget.addEventListener('keydown', captureKeys as EventListener, true);
+  surface.addEventListener('keydown', captureKeys, true);
   tableWrap.addEventListener('scroll', () => {
     updateFrozenShadow();
     scheduleWindow();
@@ -811,7 +790,6 @@ function mountWorkspaceSurface(
   tableWrap.addEventListener('focusin', gridFocus);
   tableWrap.addEventListener('focusout', (event) => {
     if (event.relatedTarget && !tableWrap.contains(event.relatedTarget as Node)) {
-      tableKeys.reset();
       restoreGridFocus = false;
     }
   });
@@ -866,19 +844,12 @@ function mountWorkspaceSurface(
   function updateAppearance(): void {
     surface.dataset.appearance = globals.appearance;
     surface.dataset.authorFormat = globals.authorFormat;
-    keyHints.hidden = !globals.showShortcuts || !globals.keyboardFlow;
     customStyle.textContent = globals.customCSS ? scopeCustomCSS(globals.customCSS, doc) : '';
   }
 
   function applyGlobals(next: GlobalPreferences): void {
     const previous = globals;
     globals = next;
-    if (previous.keyboardFlow !== next.keyboardFlow) tableKeys.reset();
-    if (
-      previous.showShortcuts !== next.showShortcuts ||
-      previous.keyboardFlow !== next.keyboardFlow
-    )
-      keyHints.hidden = !next.showShortcuts || !next.keyboardFlow;
     if (previous.appearance !== next.appearance) surface.dataset.appearance = next.appearance;
     if (previous.customCSS !== next.customCSS)
       customStyle.textContent = next.customCSS ? scopeCustomCSS(next.customCSS, doc) : '';
@@ -923,101 +894,95 @@ function mountWorkspaceSurface(
     if (
       event.defaultPrevented ||
       !target?.closest ||
-      (!surface.contains(target) && target !== root)
+      event.isComposing ||
+      event.keyCode === 229 ||
+      composingSearch ||
+      event.altKey ||
+      event.shiftKey
     )
       return;
-    if (
-      event.key === 'Escape' &&
-      !event.isComposing &&
-      event.keyCode !== 229 &&
-      !event.repeat &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.altKey &&
-      popovers.isOpen(columnPane) &&
-      columnSearch.value
-    ) {
+
+    if (event.ctrlKey || event.metaKey) {
+      const focused = doc.activeElement;
+      if (
+        event.ctrlKey === event.metaKey ||
+        event.key.toLowerCase() !== 'f' ||
+        event.repeat ||
+        !focused ||
+        !surface.contains(focused) ||
+        popovers.isOpen() ||
+        (target !== search && target.closest(EDITABLE_KEYS)) ||
+        (focused !== search && focused.closest(EDITABLE_KEYS))
+      )
+        return;
+      focusSearch();
+      search.select();
+    } else if (popovers.isOpen()) {
+      if (event.key !== 'Escape' || event.repeat) return;
+      if (!popovers.isOpen(columnPane) || !columnSearch.value) {
+        popovers.consumeEscape(event);
+        return;
+      }
       columnSearch.value = '';
       moreColumnsOpen = false;
       renderColumns();
       columnSearch.focus({ preventScroll: true });
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    if (!composingSearch && popovers.consumeEscape(event)) return;
-    if (
-      !event.isComposing &&
-      event.keyCode !== 229 &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.altKey
-    ) {
-      if (event.key === ' ' && target.closest('button, input, select, textarea')) {
-        event.stopPropagation();
-        return;
-      }
-      if (target.closest('.zb-editor')) {
-        if (event.key === 'Escape') {
-          closeEditor?.(true);
-        } else if (event.key === 'Enter' && target.localName === 'button') {
-          (target as HTMLButtonElement).click();
-        } else if (!editorKey?.(event)) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (tabs.contains(target) && moveViewTab(target, event.key)) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-    }
-    if (isBoard()) {
-      if (globals.keyboardFlow && !popovers.isOpen() && board.key(event)) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-    } else gridKeys(event, target);
-    workspaceKeys(event);
-    if (event.defaultPrevented) event.stopPropagation();
+    } else if (!handleWorkspaceKey(event, target)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
   }
 
-  function workspaceKeys(event: KeyboardEvent): void {
-    if (
-      event.defaultPrevented ||
-      event.isComposing ||
-      composingSearch ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      event.repeat
-    )
-      return;
-    const target = event.target as Element | null;
-    if (event.key === 'Escape' && ownsSearch(target)) {
-      if (search.value) clearSearch();
-      else if (!searchToggle.hidden && !searchField.hidden) closeSearch();
-      else if (selected.size) clearSelection();
-      else return;
-      event.preventDefault();
-      return;
+  function handleWorkspaceKey(event: KeyboardEvent, target: Element): boolean {
+    if (target.closest('.zb-editor')) {
+      if (event.key === 'Escape' && !event.repeat && closeEditor) {
+        closeEditor(true);
+        return true;
+      }
+      if (event.key === 'Enter' && event.repeat) return false;
+      return editorKey?.(event) ?? false;
     }
+    if (tabs.contains(target) && moveViewTab(target, event.key)) return true;
+    const boardLayout = isBoard();
+    if (boardLayout && board.key(event)) return true;
+    const command = tableKeys.handle(event);
+    if (!command) return false;
+    if (command === 'escape') return escapeWorkspace(target);
+    if (boardLayout || (target !== tableWrap && !target.closest('tbody tr[data-row-key]')))
+      return false;
+    const control = target.closest(`button, input[type=checkbox], a[href], ${EDITABLE_KEYS}`);
     if (
-      target !== search &&
-      target?.closest('input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor')
+      control &&
+      (command === 'activate' ||
+        typeof command !== 'string' ||
+        !control.classList.contains('zb-group-toggle'))
     )
-      return;
-    if (event.key === '/' && target !== search) {
-      event.preventDefault();
-      focusSearch();
-    } else if (event.key === 'Escape' && search.value) {
-      event.preventDefault();
+      return false;
+    return runGridCommand(command);
+  }
+
+  function escapeWorkspace(target: Element): boolean {
+    const inSearch = ownsSearch(target);
+    if (!inSearch && target.closest(EDITABLE_KEYS)) return false;
+    if (search.value) {
       clearSearch();
+      return true;
     }
+    if (inSearch && !searchToggle.hidden && !searchField.hidden) {
+      closeSearch();
+      return true;
+    }
+    const focused = doc.activeElement as HTMLElement | null;
+    const inTable =
+      !tableWrap.hidden && tableWrap.contains(target) && focused && tableWrap.contains(focused);
+    if (selected.size && (inSearch || inTable)) {
+      clearSelection();
+      return true;
+    }
+    if (!inTable) return false;
+    restoreGridFocus = false;
+    focused.blur();
+    return true;
   }
 
   function syncDensity(): void {
@@ -1081,7 +1046,6 @@ function mountWorkspaceSurface(
     densityControl.hidden = enabled;
     tableWrap.hidden = enabled;
     boardRoot.hidden = !enabled;
-    keyHints.textContent = t(enabled ? 'boardKeyboardHint' : 'keyboardHint');
   }
 
   function showStatus(message: string, error = false): void {
@@ -1099,6 +1063,21 @@ function mountWorkspaceSurface(
     if (!column.startsWith('property:')) return undefined;
     const key = column.slice('property:'.length);
     return preferences.properties.find((property) => property.key === key);
+  }
+
+  function defaultColumnWidth(column: Column): number {
+    if (isNativeColumn(column)) return NATIVE_COLUMN_BY_KEY[column].defaultWidth;
+    switch (propertyFor(column)?.type) {
+      case 'rating':
+      case 'single-select':
+        return 120;
+      case 'date':
+        return 112;
+      case 'url':
+        return 160;
+      default:
+        return 140;
+    }
   }
 
   function allColumns(): Column[] {
@@ -1178,7 +1157,6 @@ function mountWorkspaceSurface(
     if ((changedActive || changedScope || changedLayout) && isBoard(previousView)) board.clear();
     if (changedLayout) {
       popovers.close(false);
-      tableKeys.reset();
       syncLayout();
     }
     if (changedActive) {
@@ -1292,19 +1270,16 @@ function mountWorkspaceSurface(
     } while (preferences.views.some((view) => view.id === id));
     const view: View = copy
       ? { ...source, name: unique, id }
-      : {
-          name: unique,
-          id,
-          scope: host.initialScope(),
-          columns: DEFAULT_COLUMNS,
-          sorts: [{ column: 'title', direction: 'asc' }],
-          filters: [],
-          density: globals.defaultDensity,
-          frozenCount: 1,
-          ...(viewLayout === 'board'
-            ? { layout: viewLayout, board: defaultBoardSettings(preferences.properties) }
-            : {}),
-        };
+      : createViewDefaults(
+          {
+            name: unique,
+            id,
+            scope: host.initialScope(),
+            layout: viewLayout,
+            density: globals.defaultDensity,
+          },
+          preferences.properties,
+        );
     saveViews([...preferences.views, view], id);
   }
 
@@ -2708,17 +2683,14 @@ function mountWorkspaceSurface(
     const total = result?.rows.length ?? 0;
     bulkBar.hidden = !selected.size;
     selectionCount.textContent = zh ? `已选择 ${selected.size} 条` : `${selected.size} selected`;
-    const parts = [
+    const summary =
       searchTerm || activeView().filters.length
         ? zh
           ? `匹配 ${total}／${catalog?.rows.length ?? 0} 条`
           : `Matched ${total} / ${catalog?.rows.length ?? 0} items`
         : zh
           ? `共 ${total} 条`
-          : `${total} items`,
-    ];
-    if (selected.size) parts.push(selectionCount.textContent);
-    const summary = parts.join(' · ');
+          : `${total} items`;
     if (count.textContent !== summary) count.textContent = summary;
     if (tableWrap.hidden) return;
     const header = tableWrap.querySelector<HTMLInputElement>('[data-select-all]');
@@ -3415,35 +3387,7 @@ function mountWorkspaceSurface(
     }
   }
 
-  function gridKeys(event: KeyboardEvent, target: Element): void {
-    if (
-      !globals.keyboardFlow ||
-      event.defaultPrevented ||
-      (target !== tableWrap && !target.closest('tbody tr[data-row-key]')) ||
-      event.keyCode === 229 ||
-      target.closest('input:not([type=checkbox]), textarea, select, [contenteditable], .zb-editor')
-    )
-      return;
-    if (
-      event.key === 'Enter' &&
-      target.matches(`input[type=checkbox], .zb-title-action, ${GRID_CONTROLS}`)
-    )
-      return;
-    const command = tableKeys.handle(event);
-    if (!command) return;
-    if (!runGridCommand(command)) return;
-    event.preventDefault();
-    event.stopPropagation();
-  }
-
-  function runGridCommand(command: TableCommand): boolean {
-    if (command === 'prefix') return true;
-    if (command === 'escape') {
-      if (search.value) clearSearch();
-      else if (selected.size) clearSelection();
-      else return false;
-      return true;
-    }
+  function runGridCommand(command: Exclude<TableCommand, 'escape'>): boolean {
     const current = activeCell;
     if (!current || !tableBody) return false;
     const index = layout.indexOf(current.key);
@@ -3473,41 +3417,7 @@ function mountWorkspaceSurface(
       case 'down':
         destination += command === 'up' ? -1 : 1;
         break;
-      case 'first':
-        destination = 0;
-        break;
-      case 'last':
-        destination = entries.length - 1;
-        break;
-      case 'pageUp':
-      case 'pageDown':
-        destination = layout.indexAt(
-          layout.offset(index) + (command === 'pageUp' ? -1 : 1) * viewportHeight(),
-        );
-        if (destination === index) destination += command === 'pageUp' ? -1 : 1;
-        break;
-      case 'extendUp':
-      case 'extendDown': {
-        const step = command === 'extendUp' ? -1 : 1;
-        destination += step;
-        while (entries[destination]?.kind === 'group') destination += step;
-        const to = entries[destination];
-        if (to?.kind !== 'item') return true;
-        if (selectionAnchor === undefined && entry.kind === 'item') selectionAnchor = entry.row.id;
-        selectItem(to.row.id, true, true);
-        break;
-      }
-      case 'toggle':
-        if (entry.kind === 'item') selectItem(entry.row.id, !selected.has(entry.row.id), false);
-        return true;
-      case 'open':
-        if (entry.kind === 'item') {
-          if (entry.row.pdf) openRow(entry.row, true);
-          else showStatus(t('noPDF'));
-        }
-        return true;
       case 'activate':
-      case 'edit':
         if (entry.kind === 'group') {
           setGroupFolded(entry, !entry.folded);
         } else {
@@ -3568,7 +3478,8 @@ function mountWorkspaceSurface(
     const columns = table.querySelectorAll<HTMLTableColElement>('col[data-column]');
     for (let index = 0; index < columns.length; index++) {
       const col = columns[index]!;
-      const width = columnWidth(view, col.dataset.column as Column);
+      const column = col.dataset.column as Column;
+      const width = view.columnWidths?.[column] ?? defaultColumnWidth(column);
       const size = `${width}px`;
       if (col.style.width !== size) {
         if (connected && !changed) holdWidthAnchor();
@@ -3656,7 +3567,7 @@ function mountWorkspaceSurface(
     grip.addEventListener('lostpointercapture', end);
     grip.addEventListener('dblclick', () => commit(defaultColumnWidth(column)));
     grip.addEventListener('keydown', (event) => {
-      const width = columnWidth(activeView(), column);
+      const width = activeView().columnWidths?.[column] ?? defaultColumnWidth(column);
       const amount = event.shiftKey ? 32 : 8;
       const direction = window?.getComputedStyle(table).direction === 'rtl' ? -1 : 1;
       if (event.key === 'ArrowLeft') commit(bound(width - amount * direction));
@@ -4160,7 +4071,7 @@ function mountWorkspaceSurface(
     disposeSync?.();
     board.dispose();
     popovers.dispose();
-    keyTarget.removeEventListener('keydown', captureKeys as EventListener, true);
+    surface.removeEventListener('keydown', captureKeys, true);
     narrowWindow?.removeEventListener('change', syncSearchMode);
     window?.clearTimeout(searchTimer);
     if (fitFrame !== undefined) window?.cancelAnimationFrame(fitFrame);

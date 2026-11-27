@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createConfig,
   decodeSyncSnapshot,
@@ -45,28 +45,73 @@ const secondView = {
 } satisfies View;
 
 describe('Zotero Bases configuration', () => {
-  it('persists an immediately usable default in the first native scope and reuses it across hosts', () => {
+  it('persists starter preferences once in the first native scope and reuses them across hosts', () => {
     const { prefs, raw } = preferences();
+    const write = vi.spyOn(prefs, 'set');
     const scope = 'group:18/SUBCOLL0';
     const first = createConfig(prefs, () => scope, validateProperty).settings();
-    expect(first).toMatchObject({
+    expect(first.properties.map(({ key }) => key)).toEqual([
+      'Reading Stage',
+      'Rating',
+      'Code / Home',
+    ]);
+    expect(first.views.map(({ name, scope }) => ({ name, scope }))).toEqual([
+      { name: 'All Literature', scope },
+      { name: 'Reading Board', scope },
+    ]);
+    expect(first.active).toBe(first.views[0]!.id);
+    expect(write.mock.calls.map(([key]) => key)).toEqual([SCHEMA_PREF, VIEWS_PREF]);
+    const saved = [...raw];
+    const second = createConfig(prefs, () => 'user', validateProperty, {
+      language: 'zh-CN',
+      density: 'wrap',
+    });
+    expect(second.settings()).toEqual(first);
+    expect([...raw]).toEqual(saved);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [SCHEMA_PREF, '[ { "key": "Old Property", "type": "text" } ]'],
+    [SCHEMA_PREF, '[]'],
+    [SCHEMA_PREF, ''],
+    [SCHEMA_PREF, '{'],
+    [VIEWS_PREF, JSON.stringify({ active: secondView.id, views: [secondView] }, null, 2)],
+    [VIEWS_PREF, '{"views":[]}'],
+    [VIEWS_PREF, 'null'],
+    [VIEWS_PREF, ''],
+    [VIEWS_PREF, '{'],
+  ])('does not initialize when %s alone is present (%s)', (key, value) => {
+    const { prefs, raw } = preferences();
+    raw.set(key, value);
+    const write = vi.spyOn(prefs, 'set');
+    createConfig(prefs, () => 'user', validateProperty).settings();
+    expect([...raw]).toEqual([[key, value]]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy decoder fallback and leaves both preferences missing when initialization is disabled', () => {
+    const { prefs, raw } = preferences();
+    const config = createConfig(prefs, () => 'user', validateProperty, {
+      initializeDefault: false,
+      language: 'zh-CN',
+      density: 'wrap',
+    });
+    expect(config.settings()).toEqual({
       properties: [],
       active: 'default',
-      views: [{ id: 'default', scope, sorts: [{ column: 'title', direction: 'asc' }] }],
+      views: [
+        {
+          id: 'default',
+          name: 'Default',
+          scope: 'user',
+          columns: ['title', 'creators', 'year', 'source', 'type', 'tags', 'pdf', 'added'],
+          sorts: [{ column: 'title', direction: 'asc' }],
+          filters: [],
+        },
+      ],
     });
-    expect(first.views[0]!.columns).toEqual(DEFAULT_COLUMNS);
-    expect(DEFAULT_COLUMNS).toEqual([
-      'title',
-      'creators',
-      'year',
-      'source',
-      'type',
-      'tags',
-      'pdf',
-      'added',
-    ]);
-    expect([...raw.keys()]).toEqual([VIEWS_PREF]);
-    expect(createConfig(prefs, () => 'user', validateProperty).settings()).toEqual(first);
+    expect(raw.size).toBe(0);
   });
 
   it('decodes a legacy sort locally and remotely without rewriting the saved view', () => {
@@ -124,7 +169,9 @@ describe('Zotero Bases configuration', () => {
 
   it('persists and syncs presentation settings including widths for removed properties', () => {
     const { prefs, raw } = preferences();
-    const config = createConfig(prefs, () => 'user', validateProperty);
+    const config = createConfig(prefs, () => 'user', validateProperty, {
+      initializeDefault: false,
+    });
     const presented: View = {
       ...secondView,
       density: 'wrap',
@@ -143,14 +190,18 @@ describe('Zotero Bases configuration', () => {
       validateProperty,
     );
     expect(remote).toEqual({ schema: [], views: [presented] });
-    const target = createConfig(preferences().prefs, () => 'user', validateProperty);
+    const target = createConfig(preferences().prefs, () => 'user', validateProperty, {
+      initializeDefault: false,
+    });
     target.applySync(remote!);
     expect(target.settings()).toEqual({ properties: [], views: [presented], active: presented.id });
   });
 
   it('preserves independent board and table settings when the layout changes', () => {
     const { prefs, raw } = preferences();
-    const config = createConfig(prefs, () => 'user', validateProperty);
+    const config = createConfig(prefs, () => 'user', validateProperty, {
+      initializeDefault: false,
+    });
     const board: View = {
       ...secondView,
       layout: 'board',
@@ -255,7 +306,9 @@ describe('Zotero Bases configuration', () => {
 
   it('keeps frozenCount optional locally and rejects malformed portable counts', () => {
     const { prefs, raw } = preferences();
-    const config = createConfig(prefs, () => 'user', validateProperty);
+    const config = createConfig(prefs, () => 'user', validateProperty, {
+      initializeDefault: false,
+    });
     const unfrozen = { ...secondView, id: 'unfrozen', frozenCount: 0 };
     const views = [secondView, unfrozen];
     config.writeViews({ views, active: unfrozen.id });
@@ -454,7 +507,7 @@ describe('Zotero Bases configuration', () => {
       { kind: 'prefix', name: 'Café', color: 'orange' },
       { kind: 'tag', name: 'café', color: 'teal' },
     ];
-    expect([...raw.keys()]).toEqual([VIEWS_PREF, TAG_COLORS_PREF]);
+    expect([...raw.keys()]).toEqual([SCHEMA_PREF, VIEWS_PREF, TAG_COLORS_PREF]);
     expect(JSON.parse(raw.get(TAG_COLORS_PREF)!)).toEqual(rules);
     expect(createConfig(prefs, () => 'all', validateProperty).settings().tagColors).toEqual(rules);
 

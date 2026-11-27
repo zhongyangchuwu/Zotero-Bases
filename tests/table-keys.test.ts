@@ -12,104 +12,34 @@ function key(key: string, options: Partial<Omit<KeyEvent, 'key'>> = {}): KeyEven
     shiftKey: false,
     isComposing: false,
     repeat: false,
-    timeStamp: 0,
+    keyCode: 0,
     ...options,
   };
 }
 
 describe('TableKeys', () => {
   it.each<[string, TableCommand]>([
-    ['h', 'left'],
     ['ArrowLeft', 'left'],
-    ['l', 'right'],
     ['ArrowRight', 'right'],
-    ['j', 'down'],
     ['ArrowDown', 'down'],
-    ['k', 'up'],
     ['ArrowUp', 'up'],
-    ['G', 'last'],
-    ['PageDown', 'pageDown'],
-    ['PageUp', 'pageUp'],
     ['Enter', 'activate'],
-    ['i', 'edit'],
-    ['x', 'toggle'],
-    ['o', 'open'],
     ['Escape', 'escape'],
   ])('maps %s to %s', (input, command) => {
     expect(new TableKeys().handle(key(input))).toBe(command);
   });
 
-  it.each<[string, TableCommand]>([
-    ['J', 'extendDown'],
-    ['j', 'extendDown'],
-    ['ArrowDown', 'extendDown'],
-    ['K', 'extendUp'],
-    ['k', 'extendUp'],
-    ['ArrowUp', 'extendUp'],
-    ['G', 'last'],
-  ])('maps shift-%s to %s', (input, command) => {
-    expect(new TableKeys().handle(key(input, { shiftKey: true }))).toBe(command);
-  });
-
-  it.each<[string, TableCommand]>([
-    ['d', 'pageDown'],
-    ['u', 'pageUp'],
-  ])('maps ctrl-%s to %s', (input, command) => {
-    expect(new TableKeys().handle(key(input, { ctrlKey: true }))).toBe(command);
-    expect(new TableKeys().handle(key(input, { ctrlKey: true, repeat: true }))).toBe(command);
-  });
-
-  it('recognizes gg through the 900ms boundary and starts a new sequence after expiry', () => {
-    const keys = new TableKeys();
-    expect(keys.handle(key('g', { timeStamp: 100 }))).toBe('prefix');
-    expect(keys.handle(key('g', { timeStamp: 1000 }))).toBe('first');
-    expect(keys.handle(key('g', { timeStamp: 1100 }))).toBe('prefix');
-    expect(keys.handle(key('g', { timeStamp: 2001 }))).toBe('prefix');
-    expect(keys.handle(key('g', { timeStamp: 2002 }))).toBe('first');
-  });
-
-  it('does not treat a repeated g as a second press or refresh its deadline', () => {
-    const keys = new TableKeys();
-    expect(keys.handle(key('g', { repeat: true }))).toBeUndefined();
-    expect(keys.handle(key('g', { timeStamp: 100 }))).toBe('prefix');
-    expect(keys.handle(key('g', { repeat: true, timeStamp: 500 }))).toBeUndefined();
-    expect(keys.handle(key('g', { timeStamp: 1001 }))).toBe('prefix');
-    expect(keys.handle(key('g', { timeStamp: 1002 }))).toBe('first');
-  });
-
-  it('clears the pending prefix on reset and when another key intervenes', () => {
-    const keys = new TableKeys();
-    expect(keys.handle(key('g'))).toBe('prefix');
-    keys.reset();
-    expect(keys.handle(key('g', { timeStamp: 1 }))).toBe('prefix');
-    expect(keys.handle(key('h', { timeStamp: 2 }))).toBe('left');
-    expect(keys.handle(key('g', { timeStamp: 3 }))).toBe('prefix');
-    expect(keys.handle(key('?', { timeStamp: 4 }))).toBeUndefined();
-    expect(keys.handle(key('g', { timeStamp: 5 }))).toBe('prefix');
-  });
-
-  it('does not complete a sequence with an earlier timestamp', () => {
-    const keys = new TableKeys();
-    expect(keys.handle(key('g', { timeStamp: 100 }))).toBe('prefix');
-    expect(keys.handle(key('g', { timeStamp: 99 }))).toBe('prefix');
-  });
-
   it('allows navigation to repeat but does not repeat actions', () => {
     const keys = new TableKeys();
     for (const [input, command] of [
-      ['h', 'left'],
+      ['ArrowLeft', 'left'],
       ['ArrowRight', 'right'],
-      ['j', 'down'],
+      ['ArrowDown', 'down'],
       ['ArrowUp', 'up'],
-      ['G', 'last'],
-      ['PageDown', 'pageDown'],
-      ['PageUp', 'pageUp'],
     ] as const) {
       expect(keys.handle(key(input, { repeat: true }))).toBe(command);
     }
-    expect(keys.handle(key('J', { shiftKey: true, repeat: true }))).toBe('extendDown');
-    expect(keys.handle(key('ArrowUp', { shiftKey: true, repeat: true }))).toBe('extendUp');
-    for (const input of ['Enter', 'i', 'x', 'o', 'Escape']) {
+    for (const input of ['Enter', 'Escape', '0', '5']) {
       expect(keys.handle(key(input, { repeat: true }))).toBeUndefined();
     }
   });
@@ -130,53 +60,41 @@ describe('TableKeys', () => {
     }
   });
 
-  it('does not claim unknown shortcuts or unsupported modifier combinations', () => {
+  it('leaves the removed shortcuts and unsupported keys to their native behavior', () => {
     const keys = new TableKeys();
-    for (const event of [
-      key('?'),
-      key('J'),
-      key('K'),
-      key('h', { shiftKey: true }),
-      key('ArrowLeft', { shiftKey: true }),
-      key('PageDown', { shiftKey: true }),
-      key('Enter', { shiftKey: true }),
-      key('g', { ctrlKey: true }),
-      key('d', { metaKey: true }),
-      key('d', { altKey: true }),
-      key('d', { ctrlKey: true, shiftKey: true }),
-      key('d', { ctrlKey: true, metaKey: true }),
-      key('u', { ctrlKey: true, altKey: true }),
-      key('G', { shiftKey: true, metaKey: true }),
-      key('J', { shiftKey: true, ctrlKey: true }),
-    ]) {
-      expect(keys.handle(event)).toBeUndefined();
+    for (const input of ['h', 'j', 'k', 'l', 'x', 'o', 'i', 'g', 'g', 'G', '/']) {
+      expect(keys.handle(key(input))).toBeUndefined();
+    }
+    for (const input of ['PageUp', 'PageDown', '?']) {
+      expect(keys.handle(key(input))).toBeUndefined();
+    }
+    for (const input of ['d', 'u']) {
+      expect(keys.handle(key(input, { ctrlKey: true }))).toBeUndefined();
     }
   });
 
-  it('maps only plain, non-repeated rating digits to exact set and clear commands', () => {
+  it('leaves modified keys and both forms of composition untouched', () => {
     const keys = new TableKeys();
-    expect(keys.handle(key('0'))).toEqual({ rating: null });
-    for (const rating of ['1', '2', '3', '4', '5']) {
-      expect(keys.handle(key(rating))).toEqual({ rating });
+    for (const input of ['ArrowLeft', 'ArrowDown', 'Enter', 'Escape', '0', '1']) {
       for (const flags of [
-        { repeat: true },
-        { isComposing: true },
         { ctrlKey: true },
         { altKey: true },
         { metaKey: true },
         { shiftKey: true },
+        { isComposing: true },
+        { keyCode: 229 },
       ]) {
-        expect(keys.handle(key(rating, flags))).toBeUndefined();
+        expect(keys.handle(key(input, flags))).toBeUndefined();
       }
     }
-    expect(keys.handle(key('6'))).toBeUndefined();
   });
 
-  it('ignores composition and cancels a pending prefix', () => {
+  it('maps all rating digits to exact set and clear commands', () => {
     const keys = new TableKeys();
-    expect(keys.handle(key('g'))).toBe('prefix');
-    expect(keys.handle(key('g', { isComposing: true, timeStamp: 1 }))).toBeUndefined();
-    expect(keys.handle(key('g', { timeStamp: 2 }))).toBe('prefix');
-    expect(keys.handle(key('Enter', { isComposing: true }))).toBeUndefined();
+    expect(keys.handle(key('0'))).toEqual({ rating: null });
+    for (const rating of ['1', '2', '3', '4', '5']) {
+      expect(keys.handle(key(rating))).toEqual({ rating });
+    }
+    expect(keys.handle(key('6'))).toBeUndefined();
   });
 });
