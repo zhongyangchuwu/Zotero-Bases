@@ -62,6 +62,17 @@ const STARTER_LABELS = {
   },
 } as const;
 
+// Leave room for the checkbox and column menu at 1920px with 150% UI scaling.
+const STARTER_TABLE_WIDTHS: NonNullable<View['columnWidths']> = {
+  title: 260,
+  creators: 124,
+  year: 84,
+  source: 124,
+  tags: 108,
+  pdf: 96,
+  added: 132,
+};
+
 export function createStarterDefaults(
   language: Language,
   density: Density,
@@ -79,27 +90,30 @@ export function createStarterDefaults(
     { key: rating, type: 'rating' },
     { key: code, type: 'url' },
   ];
-  const literature = createViewDefaults(
-    {
-      id: 'starter-literature',
-      name: table,
-      scope,
-      layout: 'table',
-      density,
-      columns: [
-        'title',
-        'creators',
-        'year',
-        'source',
-        `property:${stage}`,
-        `property:${rating}`,
-        'tags',
-        'pdf',
-        'added',
-      ],
-    },
-    properties,
-  );
+  const literature: View = {
+    ...createViewDefaults(
+      {
+        id: 'starter-literature',
+        name: table,
+        scope,
+        layout: 'table',
+        density,
+        columns: [
+          'title',
+          'creators',
+          'year',
+          'source',
+          `property:${stage}`,
+          `property:${rating}`,
+          'tags',
+          'pdf',
+          'added',
+        ],
+      },
+      properties,
+    ),
+    columnWidths: STARTER_TABLE_WIDTHS,
+  };
   const readingBoard = createViewDefaults(
     {
       id: 'starter-reading-board',

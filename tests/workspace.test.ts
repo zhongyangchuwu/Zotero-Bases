@@ -1365,7 +1365,7 @@ describe('Zotero Bases workspace', () => {
     expect(active(host).columnWidths?.title).toBeUndefined();
   });
 
-  it('keeps the nine starter columns within a 1080p tab and freezes the title', async () => {
+  it('fits nine starter columns in a 1080p tab at 150% scaling and freezes the title', async () => {
     const { prefs } = preferences();
     const config = createConfig(prefs, () => 'personal', validate, { language: 'zh-CN' });
     const settings = config.settings();
@@ -1373,11 +1373,11 @@ describe('Zotero Bases workspace', () => {
     const { host } = fixture([sample], view, settings.properties);
     const { root } = attach(host, { language: 'zh-CN' });
     const viewport = get(root, '.zb-table-wrap');
-    Object.defineProperty(viewport, 'clientWidth', { value: 1600 });
+    Object.defineProperty(viewport, 'clientWidth', { value: 1260 });
     const rect = vi
       .spyOn(HTMLTableCellElement.prototype, 'getBoundingClientRect')
       .mockImplementation(function (this: HTMLTableCellElement) {
-        return new DOMRect(0, 0, this.cellIndex === 0 ? 36 : 360, 30);
+        return new DOMRect(0, 0, this.cellIndex === 0 ? 36 : 260, 30);
       });
     try {
       await settle();
