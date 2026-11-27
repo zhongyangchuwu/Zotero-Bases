@@ -67,7 +67,7 @@ interface Popup {
 }
 interface NativeTab {
   id: string;
-  root: HTMLElement;
+  focus: () => void;
   dispose: () => void;
 }
 interface Session {
@@ -233,6 +233,7 @@ function sessionFor(window: Window): Session | undefined {
   const tabs = owner.Zotero_Tabs;
   if (typeof tabs?.add !== 'function' || typeof tabs.getState !== 'function') return;
   const getState = tabs.getState;
+  const host = createWorkspaceHost(Zotero, Zotero.Prefs, owner, Zotero.locale);
   // Zotero 10 expects a built-in restore hook for every serialized type. The
   // saved view is portable within this profile; the tab itself is transient.
   const withoutBases = function (this: Tabs): readonly TabState[] {
@@ -242,7 +243,7 @@ function sessionFor(window: Window): Session | undefined {
   const session: Session = {
     owner,
     tabs,
-    host: createWorkspaceHost(Zotero, Zotero.Prefs, owner),
+    host,
     detach: () => {
       if (tabs.getState === withoutBases) tabs.getState = getState;
       owner.removeEventListener('unload', unload);
@@ -259,7 +260,6 @@ function sessionFor(window: Window): Session | undefined {
 function mountSurface(session: Session, parent: Element, popOut?: () => void) {
   const root = parent.ownerDocument.createElementNS(HTML, 'div') as HTMLElement;
   root.dataset.zoteroBases = '';
-  root.tabIndex = -1;
   // Keep wide tables from sizing Zotero's XUL deck, without reanchoring fixed overlays.
   root.style.cssText =
     'flex:1;min-width:0;min-height:0;overflow:auto;width:100%;contain:inline-size style;isolation:isolate;';
@@ -303,7 +303,11 @@ function mountSurface(session: Session, parent: Element, popOut?: () => void) {
     media.addEventListener('change', update);
     nativePane?.addEventListener('UIPropertiesChanged', updateTypography);
     return {
-      root,
+      focus: () => {
+        const surface = root.querySelector<HTMLElement>(':scope > .zb-workspace');
+        if (surface && !surface.contains(root.ownerDocument.activeElement))
+          surface.focus({ preventScroll: true });
+      },
       dispose: () => {
         media.removeEventListener('change', update);
         nativePane?.removeEventListener('UIPropertiesChanged', updateTypography);
@@ -358,12 +362,12 @@ async function openPopup(session: Session): Promise<void> {
       return;
     document.documentElement.lang = language();
     try {
-      const { root, dispose: unmount } = mountSurface(session, document.body);
+      const { focus, dispose: unmount } = mountSurface(session, document.body);
       dispose = unmount;
       const tab = session.tab;
       if (tab) session.tabs.close(tab.id);
       window.focus();
-      root.focus();
+      focus();
       resolveReady();
     } catch (error) {
       rejectReady(error);
@@ -397,7 +401,7 @@ function openTab(owner: Window): void {
   startLibrarySync();
   if (session.tab) {
     session.tabs.select(session.tab.id);
-    session.tab.root.focus();
+    session.tab.focus();
     return;
   }
   const { id, container } = session.tabs.add({
@@ -411,15 +415,15 @@ function openTab(owner: Window): void {
     },
   });
   try {
-    const { root, dispose } = mountSurface(
+    const { focus, dispose } = mountSurface(
       session,
       container,
       () => void openPopup(session).catch((error) => Zotero.logError(error)),
     );
-    session.tab = { id, root, dispose };
+    session.tab = { id, focus, dispose };
     owner.focus();
     session.tabs.select(id);
-    root.focus();
+    focus();
   } catch (error) {
     guarded(() => session.tabs.close(id));
     throw error;
@@ -435,7 +439,7 @@ function focusSession(session: Session): true | Promise<void> | undefined {
   if (!session.tab) return;
   session.owner.focus();
   session.tabs.select(session.tab.id);
-  session.tab.root.focus();
+  session.tab.focus();
   return true;
 }
 

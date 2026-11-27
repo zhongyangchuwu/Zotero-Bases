@@ -116,7 +116,7 @@ describe('preferences pane', () => {
         'Appearance and custom styles',
         'Workspace defaults',
         'Sync and configuration backup',
-        'Language and keyboard flow',
+        'Language',
       ]);
       expect(root.querySelectorAll('select')).toHaveLength(0);
       const appearance = dropdown(root, 'appearance');
@@ -127,13 +127,14 @@ describe('preferences pane', () => {
       commandMenuItem(dropdown(root, 'openMode'), 'window');
       commandMenuItem(dropdown(root, 'defaultDensity'), 'wrap');
       commandMenuItem(dropdown(root, 'authorFormat'), 'singleLine');
-      root.querySelector<HTMLInputElement>('input[name="keyboardFlow"]')!.click();
+      expect(
+        root.querySelector('input[name="keyboardFlow"], input[name="showShortcuts"]'),
+      ).toBeNull();
       expect(store.read()).toMatchObject({
         appearance: 'terminal',
         openMode: 'window',
         defaultDensity: 'wrap',
         authorFormat: 'singleLine',
-        keyboardFlow: false,
       });
       store.set('openMode', 'tab');
       expect(dropdown(root, 'openMode').getAttribute('value')).toBe('tab');

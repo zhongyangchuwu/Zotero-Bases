@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createConfigurationBackup } from '../src/backup';
-import { createConfig } from '../src/config';
+import { createConfig, SCHEMA_PREF, VIEWS_PREF } from '../src/config';
 import type { Property, View } from '../src/contracts';
 import { validateProperty } from '../src/extra';
 import { createGlobalPreferenceStore } from '../src/global-preferences';
@@ -121,9 +121,29 @@ describe('configuration backup', () => {
     expect(values.size).toBe(0);
     expect(JSON.parse(backup.exportJSON())).toMatchObject({
       schema: [],
-      views: [{ id: 'default' }],
+      views: [{ id: 'default', name: 'Default' }],
     });
     expect(values.size).toBe(0);
+  });
+
+  it('restores localized starter data unchanged on a fresh profile in a different language', () => {
+    const source = preferences();
+    createConfig(source.prefs, () => 'group:12', validateProperty, { language: 'zh-CN' });
+    const exported = createConfigurationBackup(source.prefs, validateProperty).exportJSON();
+    const target = preferences();
+    const write = vi.spyOn(target.prefs, 'set');
+    const backup = createConfigurationBackup(target.prefs, validateProperty);
+    expect(backup.importJSON(exported)).toEqual({ properties: 3, views: 2 });
+    expect(write.mock.calls.map(([key]) => key)).toEqual([SCHEMA_PREF, VIEWS_PREF]);
+    const before = [...target.values];
+
+    const workspace = createConfig(target.prefs, () => 'user', validateProperty, {
+      language: 'en',
+    });
+    expect(workspace.settings().views.map(({ name }) => name)).toEqual(['全部文献', '阅读看板']);
+    expect(backup.exportJSON()).toBe(exported);
+    expect([...target.values]).toEqual(before);
+    expect(write).toHaveBeenCalledTimes(2);
   });
 
   it('leaves all portable preferences untouched when any part of a backup is invalid', () => {

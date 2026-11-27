@@ -12,6 +12,7 @@ import type {
   WorkspaceHost,
 } from './contracts';
 import { isReservedPropertyKey, readProperty, validateProperty, writeProperty } from './extra';
+import { createGlobalPreferenceStore, resolveLanguage } from './global-preferences';
 import { isBasesSyncCarrier } from './sync-marker';
 
 export type { Prefs } from './config';
@@ -332,6 +333,7 @@ export function createWorkspaceHost(
   zotero: ZoteroData,
   prefs: Prefs,
   owner: LibraryOwner,
+  hostLocale = 'en',
 ): WorkspaceHost {
   const pane = owner.ZoteroPane;
   const libraries = () => zotero.Libraries.getAll().filter(accessible);
@@ -351,7 +353,11 @@ export function createWorkspaceHost(
   };
 
   const { validate, suggestPropertyKey } = createPropertyValidation(zotero);
-  const config = createConfig(prefs, initialScope, validate);
+  const { language, defaultDensity: density } = createGlobalPreferenceStore(prefs).read();
+  const config = createConfig(prefs, initialScope, validate, {
+    language: resolveLanguage(language, hostLocale),
+    density,
+  });
   let loadVersion = 0;
   let attachmentReads: ReadonlyMap<number, AttachmentRead> | undefined;
   let visibleAttachments: ReadonlyMap<number, MainAttachment | null> | undefined;

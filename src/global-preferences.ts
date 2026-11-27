@@ -7,12 +7,10 @@ const GLOBAL_PREF = 'extensions.zotero-bases.preferences.v1';
 export interface GlobalPreferences {
   appearance: 'classic' | 'terminal' | 'modern';
   customCSS: string;
-  showShortcuts: boolean;
   openMode: 'tab' | 'window';
   defaultDensity: Density;
   authorFormat: 'etAl' | 'singleLine';
   language: 'auto' | 'zh-CN' | 'en-US';
-  keyboardFlow: boolean;
 }
 
 export interface GlobalPreferenceStore {
@@ -24,12 +22,10 @@ export interface GlobalPreferenceStore {
 export const DEFAULT_GLOBAL_PREFERENCES: Readonly<GlobalPreferences> = Object.freeze({
   appearance: 'classic',
   customCSS: '',
-  showShortcuts: true,
   openMode: 'tab',
   defaultDensity: 'compact',
   authorFormat: 'etAl',
   language: 'auto',
-  keyboardFlow: true,
 });
 
 function parse(raw: unknown): Partial<Record<keyof GlobalPreferences, unknown>> {
@@ -54,8 +50,6 @@ export function createGlobalPreferenceStore(prefs: Prefs): GlobalPreferenceStore
           ? value.appearance
           : defaults.appearance,
       customCSS: typeof value.customCSS === 'string' ? value.customCSS : defaults.customCSS,
-      showShortcuts:
-        typeof value.showShortcuts === 'boolean' ? value.showShortcuts : defaults.showShortcuts,
       openMode: value.openMode === 'window' ? value.openMode : defaults.openMode,
       defaultDensity:
         value.defaultDensity === 'comfortable' || value.defaultDensity === 'wrap'
@@ -67,8 +61,6 @@ export function createGlobalPreferenceStore(prefs: Prefs): GlobalPreferenceStore
         value.language === 'zh-CN' || value.language === 'en-US'
           ? value.language
           : defaults.language,
-      keyboardFlow:
-        typeof value.keyboardFlow === 'boolean' ? value.keyboardFlow : defaults.keyboardFlow,
     };
   }
 

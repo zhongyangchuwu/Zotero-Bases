@@ -15,13 +15,12 @@ const captions = {
   appearancePanel: ['Appearance and custom styles', '外观与自定义样式'],
   defaultsPanel: ['Workspace defaults', '工作区默认值'],
   syncPanel: ['Sync and configuration backup', '同步与配置备份'],
-  languagePanel: ['Language and keyboard flow', '语言与键盘流'],
+  languagePanel: ['Language', '语言'],
   appearance: ['Appearance preset', '外观预设'],
   classic: ['Classic', '经典'],
   terminal: ['Terminal', '终端'],
   modern: ['Modern', '现代'],
   customCSS: ['Custom CSS', '自定义 CSS'],
-  shortcuts: ['Show shortcut hints', '显示底部快捷键提示'],
   openMode: ['Default open mode', '默认打开方式'],
   tab: ['Zotero tab', 'Zotero 标签页'],
   window: ['Separate window', '独立窗口'],
@@ -44,7 +43,6 @@ const captions = {
   auto: ['Follow Zotero', '跟随 Zotero'],
   chinese: ['简体中文', '简体中文'],
   english: ['English', 'English'],
-  keyboard: ['Enable table keyboard flow (hjkl / x / o)', '启用表格键盘流（hjkl / x / o）'],
 } as const;
 
 type Caption = keyof typeof captions;
@@ -59,7 +57,6 @@ const css = `
 .zb-preferences .zb-preference-field,
 .zb-preferences .zb-sync-location > label { display: grid; gap: 0.25rem; margin-block: 0.55rem; }
 .zb-preferences .zb-preference-field > menulist { justify-self: start; max-width: 100%; }
-.zb-preferences .zb-preference-toggle { display: flex; align-items: center; gap: 0.35rem; margin-block: 0.55rem; }
 .zb-preferences textarea { box-sizing: border-box; width: 100%; min-height: 6em; resize: vertical; font-family: monospace; }
 .zb-preferences .zb-preference-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
 .zb-preferences .zb-preference-actions > label { margin-block: 0; }
@@ -195,25 +192,6 @@ export function mountPreferences(
     parent.append(row);
   }
 
-  function toggle(
-    parent: HTMLElement,
-    key: 'showShortcuts' | 'keyboardFlow',
-    caption: Caption,
-  ): void {
-    const control = node('input');
-    control.type = 'checkbox';
-    control.name = key;
-    control.addEventListener('change', () => store.set(key, control.checked));
-    updateControls.push((value) => {
-      control.checked = value[key];
-    });
-    const row = node('label');
-    row.className = 'zb-preference-toggle';
-    row.append(control);
-    label(row, caption);
-    parent.append(row);
-  }
-
   const appearance = panel('appearance', 'appearancePanel');
   dropdown(appearance, 'appearance', 'appearance', [
     ['classic', 'classic'],
@@ -230,7 +208,6 @@ export function mountPreferences(
     if (customCSS.value !== css) customCSS.value = css;
   });
   field(appearance, 'customCSS', customCSS);
-  toggle(appearance, 'showShortcuts', 'shortcuts');
 
   const defaults = panel('defaults', 'defaultsPanel');
   dropdown(defaults, 'openMode', 'openMode', [
@@ -272,7 +249,6 @@ export function mountPreferences(
     ['zh-CN', 'chinese'],
     ['en-US', 'english'],
   ]);
-  toggle(languagePanel, 'keyboardFlow', 'keyboard');
 
   function renderMessage(): void {
     if (typeof message === 'object') {

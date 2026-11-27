@@ -22,6 +22,9 @@ import type {
   View,
 } from './contracts';
 import { readProperty, writeProperty } from './extra';
+import { DEFAULT_GLOBAL_PREFERENCES } from './global-preferences';
+import type { Language } from './i18n';
+import { createStarterDefaults } from './view-defaults';
 
 export const SCHEMA_PREF = 'extensions.zotero-bases.schema.v1';
 export const VIEWS_PREF = 'extensions.zotero-bases.views.v1';
@@ -338,7 +341,11 @@ export function createConfig(
   prefs: Prefs,
   initialScope: () => string,
   validate: Validate,
-  { initializeDefault = true } = {},
+  {
+    initializeDefault = true,
+    language = 'en',
+    density = DEFAULT_GLOBAL_PREFERENCES.defaultDensity,
+  }: { initializeDefault?: boolean; language?: Language; density?: Density } = {},
 ) {
   function views(value: unknown, active: unknown): Pick<Preferences, 'views' | 'active'> {
     const byID = new Map<string, View>();
@@ -369,9 +376,17 @@ export function createConfig(
     prefs.set(VIEWS_PREF, JSON.stringify(views(settings.views, settings.active)), true);
   }
 
-  // Persist the first scope once; later windows share the same saved default.
-  if (initializeDefault && prefs.get(VIEWS_PREF, true) === undefined)
-    prefs.set(VIEWS_PREF, JSON.stringify(views([], null)), true);
+  // Any saved value belongs to the user, even if the legacy decoder falls back.
+  if (
+    initializeDefault &&
+    prefs.get(SCHEMA_PREF, true) === undefined &&
+    prefs.get(VIEWS_PREF, true) === undefined
+  ) {
+    const starter = createStarterDefaults(language, density, initialScope());
+    const schema = starter.properties.map((property) => validate(property));
+    prefs.set(SCHEMA_PREF, JSON.stringify(schema), true);
+    writeViews(starter);
+  }
 
   function readProperties(): readonly Property[] {
     const rawSchema = parse(prefs.get(SCHEMA_PREF, true));
